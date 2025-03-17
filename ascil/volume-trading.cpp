@@ -22,7 +22,8 @@ SCSFExport scsf_VolumeBasedTradingBot(SCStudyInterfaceRef sc)
     SCInputRef VolumeThreshold = sc.Input[8];
     SCInputRef FirstTargetMultiplier = sc.Input[9];
     SCInputRef SecondTargetMultiplier = sc.Input[10];
-    
+    SCInputRef MaxPositionSize = sc.Input[11]; // ADDED: Max position size
+
     // Persistent variables
     SCPersistentInt& LastTradeBarIndex = sc.PersistVars->i1;
     SCPersistentInt& TradeActive = sc.PersistVars->i2;
@@ -66,7 +67,7 @@ SCSFExport scsf_VolumeBasedTradingBot(SCStudyInterfaceRef sc)
         TradingEndTime.Name = "Trading End Time (HHMM)";
         TradingEndTime.SetTime(HMS_TIME(16, 0, 0));
         TickMoveThreshold.Name = "Tick Move Threshold";
-        TickMoveThreshold.SetInt(3);  // Default to 3 ticks as requested
+        TickMoveThreshold.SetInt(3);
         TickMoveThreshold.SetIntLimits(1, 20);
         VolumeThreshold.Name = "Minimum Volume Threshold";
         VolumeThreshold.SetInt(100);
@@ -77,6 +78,9 @@ SCSFExport scsf_VolumeBasedTradingBot(SCStudyInterfaceRef sc)
         SecondTargetMultiplier.Name = "Second Target Multiplier";
         SecondTargetMultiplier.SetFloat(2.0f);
         SecondTargetMultiplier.SetFloatLimits(0.1f, 10.0f);
+        MaxPositionSize.Name = "Max Position Size"; // ADDED
+        MaxPositionSize.SetInt(10);                // ADDED
+        MaxPositionSize.SetIntLimits(1, 100);      // ADDED
 
         BuySignal.Name = "Buy Signal";
         BuySignal.DrawStyle = DRAWSTYLE_ARROW_UP;
@@ -113,16 +117,10 @@ SCSFExport scsf_VolumeBasedTradingBot(SCStudyInterfaceRef sc)
         return;
     }
     
-    // Get average range for calculating stop and target
-    SCFloatArray TrueRange;
-    sc.TrueRange(TrueRange);
-    float AvgRange = 0.0f;
-    for (int i = sc.Index - 14; i <= sc.Index; i++) {
-        if (i >= 0) {
-            AvgRange += TrueRange[i];
-        }
-    }
-    AvgRange /= 14.0f;
+    // Calculate ATR - Simplified and more efficient
+    SCFloatArray ATR;
+    sc.ATR(sc.BaseDataIn, ATR, 14, MOVAVGTYPE_SIMPLE);
+    float AvgRange = ATR[sc.Index];
     if (AvgRange < 0.0001f) return;
 
     SCDateTime CurrentTime = sc.CurrentSystemDateTime;
@@ -146,7 +144,9 @@ SCSFExport scsf_VolumeBasedTradingBot(SCStudyInterfaceRef sc)
 
     float RiskPerTrade = AccountBalance * (RiskPercentage.GetFloat() / 100.0f);
     float StopDistance = AvgRange * StopMultiplier.GetFloat();
+    // Cap the position size
     int PositionSize = max(1, static_cast<int>(RiskPerTrade / (StopDistance * sc.CurrencyValuePerTick)));
+    PositionSize = min(PositionSize, MaxPositionSize.GetInt()); // ADDED: Limit position size
 
     float CurrentBidPrice = sc.Bid;
     float CurrentAskPrice = sc.Ask;
@@ -221,18 +221,20 @@ SCSFExport scsf_VolumeBasedTradingBot(SCStudyInterfaceRef sc)
         }
     }
 
-    // Manage exits with targets
+   // Manage exits with targets
     if (TradeActive && PositionData.PositionQuantity != 0)
     {
         int HalfSize = OriginalPositionSize / 2;
         float EntryPrice = PositionData.AveragePrice;
+		float FirstTargetPrice, SecondTargetPrice;
 
         if (PositionData.PositionQuantity > 0) // Long position
         {
-            float ProfitDistance = ClosingPrice - EntryPrice;
+			FirstTargetPrice = EntryPrice + (AvgRange * FirstTargetMultiplier.GetFloat());
+			SecondTargetPrice = EntryPrice + (AvgRange * SecondTargetMultiplier.GetFloat());
 
             // Close half of the long position at first target
-            if (!HalfClosed && ProfitDistance >= (AvgRange * FirstTargetMultiplier.GetFloat()))
+            if (!HalfClosed && ClosingPrice >= FirstTargetPrice)
             {
                 s_SCNewOrder ExitOrder;
                 ExitOrder.OrderQuantity = HalfSize;
@@ -249,7 +251,7 @@ SCSFExport scsf_VolumeBasedTradingBot(SCStudyInterfaceRef sc)
                 sc.AddMessageToLog(message, 0);
             }
             // Close the remaining half at second target
-            else if (HalfClosed && ProfitDistance >= (AvgRange * SecondTargetMultiplier.GetFloat()))
+            else if (HalfClosed && ClosingPrice >= SecondTargetPrice)
             {
                 sc.FlattenAndCancelAllOrders();
                 TradeActive = 0;
@@ -269,10 +271,10 @@ SCSFExport scsf_VolumeBasedTradingBot(SCStudyInterfaceRef sc)
         }
         else if (PositionData.PositionQuantity < 0) // Short position
         {
-            float ProfitDistance = EntryPrice - ClosingPrice;
-
+			FirstTargetPrice = EntryPrice - (AvgRange * FirstTargetMultiplier.GetFloat());
+			SecondTargetPrice = EntryPrice - (AvgRange * SecondTargetMultiplier.GetFloat());
             // Close half of the short position at first target
-            if (!HalfClosed && ProfitDistance >= (AvgRange * FirstTargetMultiplier.GetFloat()))
+            if (!HalfClosed && ClosingPrice <= FirstTargetPrice)
             {
                 s_SCNewOrder ExitOrder;
                 ExitOrder.OrderQuantity = HalfSize;
@@ -289,7 +291,7 @@ SCSFExport scsf_VolumeBasedTradingBot(SCStudyInterfaceRef sc)
                 sc.AddMessageToLog(message, 0);
             }
             // Close the remaining half at second target
-            else if (HalfClosed && ProfitDistance >= (AvgRange * SecondTargetMultiplier.GetFloat()))
+            else if (HalfClosed && ClosingPrice <= SecondTargetPrice)
             {
                 sc.FlattenAndCancelAllOrders();
                 TradeActive = 0;
@@ -347,10 +349,12 @@ SCSFExport scsf_VolumeBasedTradingBot(SCStudyInterfaceRef sc)
     s_SCNewOrder NewOrder;
     NewOrder.OrderQuantity = PositionSize;
     NewOrder.OrderType = SCT_ORDERTYPE_MARKET;
-    NewOrder.Target1Offset = AvgRange * TargetMultiplier.GetFloat();
-    NewOrder.AttachedOrderTarget1Type = SCT_ORDERTYPE_LIMIT;
-    NewOrder.StopAllOffset = AvgRange * StopMultiplier.GetFloat();
+    NewOrder.Target1Offset = 0;  // We're managing targets manually
+    NewOrder.AttachedOrderTarget1Type = SCT_ORDERTYPE_LIMIT;  // Can still be useful for safety
+	// Calculate StopPrice based on entry side.
+	float StopPrice = (BuyConditionMet) ? ClosingPrice - StopDistance : ClosingPrice + StopDistance;
     NewOrder.AttachedOrderStopAllType = SCT_ORDERTYPE_STOP;
+	NewOrder.StopAllOffset = fabs(ClosingPrice - StopPrice);
 
     int Result = 0;
     char message[256];
