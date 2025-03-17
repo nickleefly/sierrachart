@@ -1,0 +1,6 @@
+ES: https://spotgamma-system-files.s3.amazonaws.com/SPXstr31.csv
+
+NQ: https://spotgamma-system-files.s3.amazonaws.com/NDXstr31.csv
+
+RUT: https://spotgamma-system-files.s3.amazonaws.com/RUTstr31.csv
+https://spotgamma.com/mp-files/sierra-chart-driver-v2.dll
