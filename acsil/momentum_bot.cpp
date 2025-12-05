@@ -1,8 +1,8 @@
 #include "sierrachart.h"
 
-SCDLLName("XYL - Momentum Bot V5")
+SCDLLName("XYL - Momentum Bot V6")
 
-SCSFExport scsf_MomentumReversal_MES_Signals_Fixed(SCStudyInterfaceRef sc)
+SCSFExport scsf_MomentumReversal_MES_Live_Input(SCStudyInterfaceRef sc)
 {
     // --- VISIBLE Subgraphs ---
     SCSubgraphRef RSI         = sc.Subgraph[0];
@@ -31,32 +31,44 @@ SCSFExport scsf_MomentumReversal_MES_Signals_Fixed(SCStudyInterfaceRef sc)
     int& DailyCount  = sc.GetPersistentInt(3);
 
     // --- Inputs ---
-    SCInputRef MaxDailyTrades    = sc.Input[0];
-    SCInputRef ContractsPerTrade = sc.Input[1];
-    SCInputRef HardStopPercent   = sc.Input[2];
-    SCInputRef TargetATRMult     = sc.Input[3];
-    SCInputRef ATRLength         = sc.Input[4];
-    SCInputRef TradeRTHOnly      = sc.Input[5];
+    SCInputRef MaxDailyTrades      = sc.Input[0];
+    SCInputRef ContractsPerTrade   = sc.Input[1];
+    SCInputRef HardStopPercent     = sc.Input[2];
+    SCInputRef TargetATRMult       = sc.Input[3];
+    SCInputRef ATRLength           = sc.Input[4];
+    SCInputRef TradeRTHOnly        = sc.Input[5];
+    
+    // --- NEW INPUT ---
+    SCInputRef SendOrdersToService = sc.Input[6]; 
 
     if (sc.SetDefaults)
     {
-        sc.GraphName        = "XYL - Momentum Bot V5";
+        sc.GraphName        = "XYL - Momentum Bot V6";
         sc.GraphRegion      = 0;
         sc.AutoLoop         = 1;
 
         // Input Defaults
         MaxDailyTrades.Name = "Max Daily Trades";
         MaxDailyTrades.SetInt(8);
+        
         ContractsPerTrade.Name = "Contracts Per Trade";
         ContractsPerTrade.SetInt(2);
+        
         HardStopPercent.Name = "Hard Stop %";
         HardStopPercent.SetFloat(0.20f);
+        
         TargetATRMult.Name = "Target ATR Multiplier";
         TargetATRMult.SetFloat(8.0f);
+        
         ATRLength.Name = "ATR Length";
         ATRLength.SetInt(14);
+        
         TradeRTHOnly.Name = "Trade RTH Only";
-        TradeRTHOnly.SetYesNo(true);
+        TradeRTHOnly.SetYesNo(false);
+
+        // New Input Configuration
+        SendOrdersToService.Name = "Send Orders to Trade Service (LIVE EXECUTION)";
+        SendOrdersToService.SetYesNo(false); // Default to FALSE for safety
 
         RSI.Name = "RSI"; RSI.DrawStyle = DRAWSTYLE_LINE; RSI.PrimaryColor = RGB(0, 255, 255);
         MFI.Name = "MFI"; MFI.DrawStyle = DRAWSTYLE_LINE; MFI.PrimaryColor = RGB(255, 0, 255);
@@ -79,9 +91,11 @@ SCSFExport scsf_MomentumReversal_MES_Signals_Fixed(SCStudyInterfaceRef sc)
 
         return;
     }
-    sc.SendOrdersToTradeService = false;
 
-    // --- SAFETY CHECK: Prevent calculation on first 100 bars to avoid bad SMA data ---
+    // --- APPLY INPUT TO SYSTEM VARIABLE ---
+    sc.SendOrdersToTradeService = SendOrdersToService.GetYesNo();
+
+    // --- SAFETY CHECK: Prevent calculation on first 100 bars ---
     if (sc.Index < 100) return;
 
     // --- 1. Daily Reset + Manual VWAP ---
@@ -124,7 +138,6 @@ SCSFExport scsf_MomentumReversal_MES_Signals_Fixed(SCStudyInterfaceRef sc)
     for (int i = 0; i < 14; i++)
     {
         int idx = sc.Index - i;
-        // Logic already protected by sc.Index < 100 check above
         float tpNow = (sc.High[idx] + sc.Low[idx] + sc.Close[idx]) / 3.0f;
         float tpPrev = (sc.High[idx-1] + sc.Low[idx-1] + sc.Close[idx-1]) / 3.0f;
         if (tpNow > tpPrev) posFlow += (tpNow * sc.Volume[idx]);
@@ -143,7 +156,6 @@ SCSFExport scsf_MomentumReversal_MES_Signals_Fixed(SCStudyInterfaceRef sc)
 
     int rsiScore = RSI[sc.Index] > 70 ? 25 : (RSI[sc.Index] < 30 ? 0 : (RSI[sc.Index] > 50 ? 15 : 5));
     
-    // Fixed: Ensure index is valid for lookback
     float vwapPast = VWAP[sc.Index - 20]; 
     float vwmo = (vwapPast > 0) ? ((VWAP[sc.Index] - vwapPast) / vwapPast) * 100.0f : 0.0f;
     int vwmoScore = vwmo > 1 ? 25 : (vwmo < -1 ? 0 : (vwmo > 0 ? 15 : 5));
@@ -183,8 +195,6 @@ SCSFExport scsf_MomentumReversal_MES_Signals_Fixed(SCStudyInterfaceRef sc)
     // --- EXECUTE TRADES ---
     if (DailyCount < MaxDailyTrades.GetInt() && InRTH && barClosed)
     {
-        // SAFETY: Check if we are flat before entering to prevent machine-gunning
-        // because AllowMultipleEntries is ON.
         s_SCPositionData PosData;
         sc.GetTradePosition(PosData);
         bool isFlat = (PosData.PositionQuantity == 0);
@@ -196,9 +206,7 @@ SCSFExport scsf_MomentumReversal_MES_Signals_Fixed(SCStudyInterfaceRef sc)
             Order.OrderType = SCT_ORDERTYPE_MARKET;
             Order.TimeInForce = SCT_TIF_GOOD_TILL_CANCELED;
             
-            // --- FIX IS HERE: REMOVED * sc.TickSize ---
             Order.Target1Offset = TargetATRMult.GetFloat() * ATR[sc.Index];
-            
             Order.Stop1Offset = (HardStopPercent.GetFloat() / 100.0f) * sc.Close[sc.Index];
             Order.AttachedOrderTarget1Type = SCT_ORDERTYPE_LIMIT;
             Order.AttachedOrderStop1Type = SCT_ORDERTYPE_STOP;
