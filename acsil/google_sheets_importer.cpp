@@ -1,10 +1,9 @@
 #include "sierrachart.h"
 #include <string>
 #include <sstream>
-SCDLLName("Frozen Tundra - Google Sheets Levels Importer")
+SCDLLName("Google Sheets Levels Importer")
 
 /*
-    Written by Frozen Tundra
     This study allows you to enter price values into a google docs spreadsheet
     and automatically draw those levels onto your Sierra chart window.
     The format of the Google Spreadsheet is as follows:
@@ -25,6 +24,7 @@ SCSFExport scsf_GoogleSheetsLevelsImporter(SCStudyInterfaceRef sc)
     SCInputRef i_FilePath = sc.Input[0];
     SCInputRef i_Transparency = sc.Input[1];
     SCInputRef i_ShowPrice = sc.Input[2];
+    SCInputRef i_SkipHeaderRow = sc.Input[3];
 
     // Set configuration variables
     if (sc.SetDefaults)
@@ -46,6 +46,9 @@ SCSFExport scsf_GoogleSheetsLevelsImporter(SCStudyInterfaceRef sc)
 
         i_ShowPrice.Name = "Show Price";
         i_ShowPrice.SetYesNo(0);
+
+        i_SkipHeaderRow.Name = "Skip Header Row";
+        i_SkipHeaderRow.SetYesNo(1);
 
         return;
     }
@@ -116,13 +119,21 @@ SCSFExport scsf_GoogleSheetsLevelsImporter(SCStudyInterfaceRef sc)
         Tool.TextAlignment = DT_RIGHT;
         int idx = 1;
         // used for lines and rectangles
-        float price;
+        float price = 0;
         // only used for rectangles
         float price2 = 0;
         SCString note;
         SCString color;
         int linewidth = 1;
         int textalignment = 1;
+
+        // Skip header row if enabled
+        if (LineNumber == 1 && i_SkipHeaderRow.GetYesNo())
+        {
+            LineNumber++;
+            continue;
+        }
+
         for (char* i : tokens) {
             //msg.Format("%s", i);
             //sc.AddMessageToLog(msg,1);
@@ -191,19 +202,22 @@ SCSFExport scsf_GoogleSheetsLevelsImporter(SCStudyInterfaceRef sc)
                 if (textalignment > 0) Tool.TextAlignment = textalignment;
             }
 
-            // draw line
+            // increment field counter
+            idx++;
+        }
+
+        // Draw the line/rectangle AFTER processing all tokens for this row
+        if (price > 0)  // Only draw if we have a valid price
+        {
             Tool.ChartNumber = sc.ChartNumber;
             Tool.BeginDateTime = sc.BaseDateTimeIn[0];
-            Tool.EndDateTime = sc.BaseDateTimeIn[sc.ArraySize-1];
+            Tool.EndDateTime = sc.BaseDateTimeIn[sc.ArraySize - 1];
             Tool.AddMethod = UTAM_ADD_OR_ADJUST;
             Tool.ShowPrice = i_ShowPrice.GetInt();
             Tool.TransparencyLevel = i_Transparency.GetInt();
             Tool.Text = note;
             Tool.LineNumber = LineNumber;
             sc.UseTool(Tool);
-
-            // increment field counter
-            idx++;
         }
 
         // increment row counter

@@ -2,11 +2,6 @@
 #include <unordered_map>
 SCDLLName("Recent Bid/Ask By Footprint")
 
-/*
-    Written and Developed by:
-        Frozen Tundra
-*/
-
 // ex: 10 trades come in at .439
 struct VAT {
     int DateTimeInMs;
@@ -26,8 +21,7 @@ SCSFExport scsf_RecentBidAskVolByFootprint(SCStudyInterfaceRef sc)
     SCInputRef i_VerticalOffset = sc.Input[InputIndex++];
     SCInputRef i_HorizontalOffset = sc.Input[InputIndex++];
     SCInputRef i_FontSize = sc.Input[InputIndex++];
-    SCInputRef i_FontColor = sc.Input[InputIndex++];
-    SCInputRef i_BgColor = sc.Input[InputIndex++];
+    SCInputRef i_MinVolumeThreshold = sc.Input[InputIndex++];
 
     // Set configuration variables
     if (sc.SetDefaults)
@@ -48,11 +42,19 @@ SCSFExport scsf_RecentBidAskVolByFootprint(SCStudyInterfaceRef sc)
         i_FontSize.Name = "Font Size";
         i_FontSize.SetInt(12);
 
+        i_MinVolumeThreshold.Name = "Min Volume Threshold";
+        i_MinVolumeThreshold.SetInt(30);
+        i_MinVolumeThreshold.SetIntLimits(1, 1000);
+
         // so this can be used on candlestick charts or non-footprint charts
         sc.MaintainVolumeAtPriceData = 1;
 
         return;
     }
+
+    // Check if enabled
+    if (!i_Enabled.GetYesNo())
+        return;
 
     // number of lots/total volume traded 
     // - within certain amount of time
@@ -71,16 +73,20 @@ SCSFExport scsf_RecentBidAskVolByFootprint(SCStudyInterfaceRef sc)
 
     int NUM_TIME_AND_SALES_RECORDS_TO_EXAMINE = 1000;
 
-    int x_Time;
-    float x_Price;
-    int x_Volume;
-    int x_NumTrades;
+    // Initialize to safe defaults
+    int x_Time = 0;
+    float x_Price = 0;
+    int x_Volume = 0;
+    int x_NumTrades = 0;
+    bool foundLargeVolume = false;
 
+    // Calculate safe loop bounds to prevent out-of-bounds access
+    int StartIdx = TimeSales.Size() - 1;
+    int EndIdx = max(0, TimeSales.Size() - NUM_TIME_AND_SALES_RECORDS_TO_EXAMINE);
 
     // Loop through the Time and Sales
     int OutputArrayIndex = sc.ArraySize;
-    //for (int TSIndex = TimeSales.Size() - 1; TSIndex >= 0; --TSIndex)
-    for (int TSIndex = TimeSales.Size() - 1; TSIndex >= TimeSales.Size() - NUM_TIME_AND_SALES_RECORDS_TO_EXAMINE; --TSIndex)
+    for (int TSIndex = StartIdx; TSIndex >= EndIdx; --TSIndex)
     {
         //Adjust timestamps to Sierra Chart TimeZone
         SCDateTimeMS DateTime = TimeSales[TSIndex].DateTime;
@@ -120,16 +126,15 @@ SCSFExport scsf_RecentBidAskVolByFootprint(SCStudyInterfaceRef sc)
             vats[itr->first].Volume += Volume;
             vats[itr->first].NumTrades++;
 
-            // spit out to debug log if this millisecond traded more than this number of contracts
-            if (vats[itr->first].Volume >= 30) {
-                //msg.Format("%d -> P=%f, V=%d, NumTrades=%d", TimeInMs, vats[itr->first].Price, vats[itr->first].Volume, vats[itr->first].NumTrades);
-                //sc.AddMessageToLog(msg, 1);
-
+            // spit out to debug log if this millisecond traded more than threshold
+            int threshold = i_MinVolumeThreshold.GetInt();
+            if (vats[itr->first].Volume >= static_cast<uint32_t>(threshold)) {
                 // set these for drawing later
                 x_Time = TimeInMs;
                 x_Price = vats[itr->first].Price;
                 x_Volume = vats[itr->first].Volume;
                 x_NumTrades = vats[itr->first].NumTrades;
+                foundLargeVolume = true;
             }
         }
         else {
@@ -154,23 +159,23 @@ SCSFExport scsf_RecentBidAskVolByFootprint(SCStudyInterfaceRef sc)
 
 
 
-    s_UseTool Tool;
-    Tool.ChartNumber = sc.ChartNumber;
-    Tool.LineNumber = 8122022;
-    //Tool.DrawingType = DRAWING_STATIONARY_TEXT;
-    Tool.DrawingType = DRAWING_TEXT;
-    //Tool.UseRelativeVerticalValues = 1;
-    //Tool.BeginValue = 15;
-    //Tool.BeginDateTime = 2;
-    Tool.BeginValue = x_Price;
-    Tool.BeginIndex = sc.Index;
-    Tool.AddMethod = UTAM_ADD_OR_ADJUST;
-    Tool.Region = sc.GraphRegion;
-    Tool.FontSize = i_FontSize.GetInt();
-    Tool.FontBold = true;
-    Tool.Text.Format("\t\t[%d] %d", x_NumTrades, x_Volume);
-    Tool.Color = COLOR_YELLOW;
-    sc.UseTool(Tool);
+    // Only draw if we found large volume trades
+    if (foundLargeVolume)
+    {
+        s_UseTool Tool;
+        Tool.ChartNumber = sc.ChartNumber;
+        Tool.LineNumber = 8122022;
+        Tool.DrawingType = DRAWING_TEXT;
+        Tool.BeginValue = x_Price;
+        Tool.BeginIndex = sc.Index;
+        Tool.AddMethod = UTAM_ADD_OR_ADJUST;
+        Tool.Region = sc.GraphRegion;
+        Tool.FontSize = i_FontSize.GetInt();
+        Tool.FontBold = true;
+        Tool.Text.Format("\t\t[%d] %d", x_NumTrades, x_Volume);
+        Tool.Color = COLOR_YELLOW;
+        sc.UseTool(Tool);
+    }
 
 
 
