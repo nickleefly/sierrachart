@@ -1,8 +1,7 @@
 #include "sierrachart.h"
 #include <vector>
 #include <algorithm>
-SCDLLName("gc5150 - FVG")
-const SCString ContactInformation = "gc5150, @gc5150 (twitter)";
+SCDLLName("FVG")
 
 /*==============================================================================
 	This study is for drawing FVG's (Fair Value Gaps)
@@ -69,7 +68,7 @@ SCSFExport scsf_FVG(SCStudyInterfaceRef sc)
 	{
 		sc.GraphName = "FVG";
 		SCString studyDescription;
-		studyDescription.Format("%s by %s\nThis study draws Fair Value Gaps", sc.GraphName.GetChars(), ContactInformation.GetChars());
+		studyDescription.Format("%s \nThis study draws Fair Value Gaps", sc.GraphName.GetChars());
 		sc.StudyDescription = studyDescription;
 		sc.GraphRegion = 0;
 		sc.AutoLoop = 0;
@@ -173,7 +172,10 @@ SCSFExport scsf_FVG(SCStudyInterfaceRef sc)
 	if (Input_FVGMaxBarLookback.GetInt() == 0)
 		sc.DataStartIndex = MIN_START_INDEX; // Need at least three bars to calculate
 	else
-		sc.DataStartIndex = sc.ArraySize - 1 - Input_FVGMaxBarLookback.GetInt() + MIN_START_INDEX;
+	{
+		int StartIdx = sc.ArraySize - 1 - Input_FVGMaxBarLookback.GetInt() + MIN_START_INDEX;
+		sc.DataStartIndex = (StartIdx < MIN_START_INDEX) ? MIN_START_INDEX : StartIdx;
+	}
 
 	if (FVGRectangles == NULL) {
 		// Array of FVGRectangle structs
@@ -188,22 +190,33 @@ SCSFExport scsf_FVG(SCStudyInterfaceRef sc)
 	{
 		// On a full recalculation non-user drawn advanced custom study drawings are automatically deleted
 		// So need to manually remove the User type drawings. Same with hiding study, if user type, need to manually remove them
-		for (int i = 0; i < FVGRectangles->size(); i++)
+		if (FVGRectangles != NULL)
 		{
-			if (FVGRectangles->at(i).AddAsUserDrawnDrawing)
-				sc.DeleteUserDrawnACSDrawing(sc.ChartNumber, FVGRectangles->at(i).LineNumber);
+			for (size_t i = 0; i < FVGRectangles->size(); i++)
+			{
+				if (FVGRectangles->at(i).AddAsUserDrawnDrawing)
+					sc.DeleteUserDrawnACSDrawing(sc.ChartNumber, FVGRectangles->at(i).LineNumber);
+			}
+			// Drawings removed, now clear
+			FVGRectangles->clear();
 		}
-		// Drawings removed, now clear to avoid re-drawing them again
-		FVGRectangles->clear();
 
-		// Study is being removed nothing more to do
-		if (sc.LastCallToFunction || sc.HideStudy)
+		// Study is being removed - clean up memory
+		if (sc.LastCallToFunction)
+		{
+			if (FVGRectangles != NULL)
+			{
+				delete FVGRectangles;
+				sc.SetPersistentPointer(0, NULL);
+			}
+			return;
+		}
+
+		if (sc.HideStudy)
 			return;
 	}
 
-	// Clear out structure to avoid contually adding onto it and causing memory/performance issues
-	// TODO: Revist above logic. For now though we can't clear it until user type drawings are removed
-	// first so have to do it after that point
+	// Clear out structure to avoid continually adding onto it and causing memory/performance issues
 	if (FVGRectangles != NULL)
 		FVGRectangles->clear();
 
@@ -269,7 +282,7 @@ SCSFExport scsf_FVG(SCStudyInterfaceRef sc)
 	}
 
 	// Draw FVG Rectangles
-	for (int i = 0; i < FVGRectangles->size(); i++)
+	for (size_t i = 0; i < FVGRectangles->size(); i++)
 	{
 		s_UseTool Tool;
 		Tool.Clear();
@@ -336,7 +349,6 @@ SCSFExport scsf_FVG(SCStudyInterfaceRef sc)
 			Tool.SecondaryColor = Input_FVGDnFillColor.GetColor();
 			Tool.LineWidth = Input_FVGDnLineWidth.GetInt();
 			Tool.TransparencyLevel = Input_FVGDnTransparencyLevel.GetInt();
-			Tool.AddMethod = UTAM_ADD_OR_ADJUST;
 			Tool.DrawMidline = Input_FVGDnDrawMidline.GetYesNo();
 
 			// If we want to allow this to show up on other charts, need to set it to user drawing
