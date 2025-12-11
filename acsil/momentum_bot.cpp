@@ -60,6 +60,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     double& VirtTargetPrice     = sc.GetPersistentDouble(9);
     int& LastExitIndex          = sc.GetPersistentInt(10); // Cooldown after exit
     int& LastSignalIndex        = sc.GetPersistentInt(11); // Track last signal bar
+    int& LastVWAPBar            = sc.GetPersistentInt(12); // Track last VWAP processed bar
 
     // =========================================================================
     // 3. INPUTS
@@ -230,33 +231,59 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         DailyCount          = 0;
         CumDelta[sc.Index]  = 0;
         VirtPos             = 0; // Reset Virtual Position
+        LastVWAPBar         = -1; // Reset VWAP bar tracking
     }
     else
     {
         CumDelta[sc.Index] = CumDelta[sc.Index - 1] + (sc.AskVolume[sc.Index] - sc.BidVolume[sc.Index]);
     }
 
-    float Price = sc.BaseData[SC_LAST][sc.Index];
-    float Vol   = sc.Volume[sc.Index];
+    // --- Find Day Start Bar Index (same as vwap_bands.cpp) ---
+    int DayStartBarIndex = sc.Index;
+    int CurrentDate = sc.GetTradingDayDate(sc.BaseDateTimeIn[sc.Index]);
 
-    CumVol += Vol;
-    CumPV  += (Price * Vol);
-    CumP2V += (Price * Price * Vol);
-
-    float StdDev = 0.0f;
-    if (CumVol > 0)
+    if (DayStartBarIndex > 0)
     {
-        VWAP[sc.Index] = (float)(CumPV / CumVol);
-        double Variance = (CumP2V / CumVol) - (VWAP[sc.Index] * VWAP[sc.Index]);
-
-        if (Variance > 0)
+        while (DayStartBarIndex > 0)
         {
-            StdDev = (float)sqrt(Variance);
+            int PrevBarDate = sc.GetTradingDayDate(sc.BaseDateTimeIn[DayStartBarIndex - 1]);
+            if (PrevBarDate != CurrentDate) break;
+            DayStartBarIndex--;
         }
+    }
+
+    // --- VWAP Calculation (recalculate from day start - proven approach) ---
+    double CumulativePV = 0.0;
+    double CumulativeVolume = 0.0;
+    double CumulativeP2V = 0.0;
+
+    for (int i = DayStartBarIndex; i <= sc.Index; i++)
+    {
+        float Price = sc.BaseData[SC_LAST][i];
+        float Volume = sc.BaseData[SC_VOLUME][i];
+
+        CumulativePV += Price * Volume;
+        CumulativeVolume += Volume;
+        CumulativeP2V += (Price * Price) * Volume;
+    }
+
+    double VWAPValue = 0.0;
+    float StdDev = 0.0f;
+
+    if (CumulativeVolume > 0)
+    {
+        VWAPValue = CumulativePV / CumulativeVolume;
+        VWAP[sc.Index] = (float)VWAPValue;
+
+        double MeanOfSquares = CumulativeP2V / CumulativeVolume;
+        double Variance = MeanOfSquares - (VWAPValue * VWAPValue);
+        if (Variance < 0) Variance = 0;
+        StdDev = (float)sqrt(Variance);
     }
     else
     {
-        VWAP[sc.Index] = Price;
+        VWAPValue = sc.Close[sc.Index];
+        VWAP[sc.Index] = (float)VWAPValue;
     }
 
     // Bands
