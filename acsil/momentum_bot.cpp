@@ -2,17 +2,6 @@
 
 SCDLLName("XYL - Momentum Bot")
 
-/*
-CHANGELOG V21:
-Setup A (Momentum): Classic mean reversion using CCI crosses gated by extreme Momentum Score (<70/>130), strictly disabled against strong trends.
-
-Setup B (Extreme Reversion): Statistical exhaustion play at 2.0 SD bands with Candle Reversal, requiring VWAP Slope confirmation (Gate > 2.0) to validate the turn.
-
-Setup C (Trend Pullback): "Buy the Dip" logic triggering on SMA 100 touches during Strong Trends (Slope > 0.2) while price remains in the shallow zone.
-
-Setup D (Extreme Breakout): Trend-following mode for violent moves (Slope > 8.0 or < -8.0) using EMA 50 confirmation and 5-bar swing breakouts.
-*/
-
 SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 {
     // =========================================================================
@@ -28,7 +17,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     SCSubgraphRef LongSignal    = sc.Subgraph[6];
     SCSubgraphRef ShortSignal   = sc.Subgraph[7];
 
-    // --- Visual Bands (2.0 SD Only) ---
+    // --- Visual Bands ---
     SCSubgraphRef Band_Top_20   = sc.Subgraph[12];
     SCSubgraphRef Band_Bot_20   = sc.Subgraph[15];
 
@@ -42,11 +31,16 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     SCSubgraphRef CumDelta      = sc.Subgraph[22];
     SCSubgraphRef CCITempSMA    = sc.Subgraph[23];
     SCSubgraphRef ATR20         = sc.Subgraph[24];
-    SCSubgraphRef EMA50         = sc.Subgraph[25]; // Explicit EMA 50 for Setup D
+    SCSubgraphRef EMA50         = sc.Subgraph[25];
 
     // --- Hidden Data ---
     SCSubgraphRef VWAP_Slope    = sc.Subgraph[26];
     SCSubgraphRef TrendLineZero = sc.Subgraph[27];
+    SCSubgraphRef ChopState     = sc.Subgraph[28];
+
+    // --- Active Trade Visuals ---
+    SCSubgraphRef VisTarget     = sc.Subgraph[29];
+    SCSubgraphRef VisStop       = sc.Subgraph[30];
 
     // =========================================================================
     // 2. PERSISTENT VARIABLES
@@ -58,6 +52,14 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     double& CumP2V              = sc.GetPersistentDouble(3);
     int& DailyCount             = sc.GetPersistentInt(4);
     int& LastTradeIndex         = sc.GetPersistentInt(5);
+
+    // Virtual Position (For Visual Backtesting)
+    int& VirtPos                = sc.GetPersistentInt(6); // 0=Flat, 1=Long, -1=Short
+    double& VirtEntryPrice      = sc.GetPersistentDouble(7);
+    double& VirtStopPrice       = sc.GetPersistentDouble(8);
+    double& VirtTargetPrice     = sc.GetPersistentDouble(9);
+    int& LastExitIndex          = sc.GetPersistentInt(10); // Cooldown after exit
+    int& LastSignalIndex        = sc.GetPersistentInt(11); // Track last signal bar
 
     // =========================================================================
     // 3. INPUTS
@@ -73,9 +75,12 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     SCInputRef ATRLength           = sc.Input[7];
     SCInputRef TradeRTHOnly        = sc.Input[8];
     SCInputRef SendOrdersToService = sc.Input[9];
-    SCInputRef MinSlopeThreshold   = sc.Input[10]; // 0.20
-    SCInputRef ExtremeSlopeBlock   = sc.Input[11]; // 8.0
-    SCInputRef SetupBSlopeGate     = sc.Input[12]; // 2.0
+    SCInputRef MinSlopeThreshold   = sc.Input[10];
+    SCInputRef ExtremeSlopeBlock   = sc.Input[11];
+    SCInputRef SetupBSlopeGate     = sc.Input[12];
+    SCInputRef ChopLookback        = sc.Input[13];
+    SCInputRef MaxSlopeFlips       = sc.Input[14];
+    SCInputRef MinBarsBetweenTrades= sc.Input[15];
 
     // =========================================================================
     // 4. CONFIGURATION (SetDefaults)
@@ -88,7 +93,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         sc.AutoLoop         = 1;
         sc.UpdateAlways     = 1;
 
-        // --- Inputs Configuration ---
+        // --- Inputs ---
         MaxDailyTrades.Name = "Max Daily Trades";
         MaxDailyTrades.SetInt(15);
 
@@ -119,16 +124,25 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         SendOrdersToService.Name = "Send Orders to Trade Service";
         SendOrdersToService.SetYesNo(false);
 
-        MinSlopeThreshold.Name = "Trend Detection Slope (0.2)";
+        MinSlopeThreshold.Name = "Trend Detection Slope";
         MinSlopeThreshold.SetFloat(0.20f);
 
-        ExtremeSlopeBlock.Name = "Extreme/Breakout Slope (8.0)";
+        ExtremeSlopeBlock.Name = "Kill Switch Slope";
         ExtremeSlopeBlock.SetFloat(8.0f);
 
-        SetupBSlopeGate.Name = "Setup B Reversion Gate (2.0)";
+        SetupBSlopeGate.Name = "Setup B Reversion Gate";
         SetupBSlopeGate.SetFloat(2.0f);
 
-        // --- Visual Bands Configuration ---
+        ChopLookback.Name = "Chop Detection Lookback";
+        ChopLookback.SetInt(10);
+
+        MaxSlopeFlips.Name = "Max Slope Flips Allowed";
+        MaxSlopeFlips.SetInt(3);
+
+        MinBarsBetweenTrades.Name = "Min Bars Between Signals";
+        MinBarsBetweenTrades.SetInt(10);
+
+        // --- Visuals ---
         Band_Top_20.Name = "T2 std";
         Band_Top_20.DrawStyle = DRAWSTYLE_HIDDEN;
         Band_Top_20.PrimaryColor = RGB(255, 0, 0);
@@ -139,7 +153,6 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         Band_Bot_20.PrimaryColor = RGB(0, 255, 0);
         Band_Bot_20.LineWidth = 2;
 
-        // --- Signals Configuration ---
         LongSignal.Name = "Buy Signal";
         LongSignal.DrawStyle = DRAWSTYLE_ARROW_UP;
         LongSignal.PrimaryColor = RGB(0, 255, 0);
@@ -150,14 +163,17 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         ShortSignal.PrimaryColor = RGB(255, 0, 0);
         ShortSignal.LineWidth = 4;
 
-        // --- Slope Visuals ---
-        VWAP_Slope.Name = "VWAP 5-Bar Slope";
-        VWAP_Slope.DrawStyle = DRAWSTYLE_HIDDEN;
+        VisTarget.Name = "Active Target";
+        VisTarget.DrawStyle = DRAWSTYLE_DASH;
+        VisTarget.PrimaryColor = RGB(0, 255, 0);
+        VisTarget.LineWidth = 2;
 
-        TrendLineZero.Name = "Slope Zero Line";
-        TrendLineZero.DrawStyle = DRAWSTYLE_IGNORE;
+        VisStop.Name = "Active Stop";
+        VisStop.DrawStyle = DRAWSTYLE_DASH;
+        VisStop.PrimaryColor = RGB(255, 0, 0);
+        VisStop.LineWidth = 2;
 
-        // --- Hidden Subgraphs ---
+        // --- Hidden ---
         VWAP.Name = "VWAP";
         VWAP.DrawStyle = DRAWSTYLE_IGNORE;
 
@@ -178,9 +194,17 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         EMA1000.DrawStyle = DRAWSTYLE_IGNORE;
 
         EMA50.Name = "EMA 50";
-        EMA50.DrawStyle = DRAWSTYLE_IGNORE; // Used for Logic D
+        EMA50.DrawStyle = DRAWSTYLE_IGNORE;
 
-        // --- System Flags ---
+        VWAP_Slope.Name = "VWAP Slope";
+        VWAP_Slope.DrawStyle = DRAWSTYLE_HIDDEN;
+
+        TrendLineZero.Name = "Zero";
+        TrendLineZero.DrawStyle = DRAWSTYLE_IGNORE;
+
+        ChopState.Name = "Chop State";
+        ChopState.DrawStyle = DRAWSTYLE_HIDDEN;
+
         sc.AllowMultipleEntriesInSameDirection = 0;
         sc.AllowOppositeEntryWithOpposingPositionOrOrders = 0;
         sc.CancelAllOrdersOnEntriesAndReversals = 0;
@@ -191,7 +215,6 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         return;
     }
 
-    // Apply Live Trading Flag
     sc.SendOrdersToTradeService = SendOrdersToService.GetYesNo();
 
     // =========================================================================
@@ -206,6 +229,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         LastDayDate         = sc.GetTradingDayDate(sc.Index);
         DailyCount          = 0;
         CumDelta[sc.Index]  = 0;
+        VirtPos             = 0; // Reset Virtual Position
     }
     else
     {
@@ -235,42 +259,60 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         VWAP[sc.Index] = Price;
     }
 
-    // --- Bands ---
+    // Bands
     Band_Top_20[sc.Index] = VWAP[sc.Index] + (2.0f * StdDev);
     Band_Bot_20[sc.Index] = VWAP[sc.Index] - (2.0f * StdDev);
 
-    // --- Shallow Bands (Setup C Internal) ---
+    // Internal 0.5 SD
     float Band_Top_05 = VWAP[sc.Index] + (0.5f * StdDev);
     float Band_Bot_05 = VWAP[sc.Index] - (0.5f * StdDev);
 
     // =========================================================================
-    // 6. TREND & EXTREME STATES
+    // 6. TREND & CHOP DETECTION
     // =========================================================================
 
     sc.SimpleMovAvg(sc.Close, SMA100, sc.Index, 100);
     sc.ExponentialMovAvg(sc.Close, EMA1000, sc.Index, 1000);
-    sc.ExponentialMovAvg(sc.Close, EMA50, sc.Index, 50); // For Setup D
+    sc.ExponentialMovAvg(sc.Close, EMA50, sc.Index, 50);
 
-    // 1. Slope Calculation (5-Bar)
+    // 1. Slope
     float CurrentSlope = VWAP[sc.Index] - VWAP[sc.Index - 5];
     VWAP_Slope[sc.Index] = CurrentSlope;
-    TrendLineZero[sc.Index] = 0.0f;
 
-    // 2. Standard Trend Thresholds (0.2)
+    // 2. Trend States
     float TrendThresh = MinSlopeThreshold.GetFloat();
     bool StrongUp     = (CurrentSlope > TrendThresh);
     bool StrongDown   = (CurrentSlope < -TrendThresh);
 
-    // 3. Extreme Thresholds (8.0)
-    float ExtremeThresh = ExtremeSlopeBlock.GetFloat();
+    // 3. Extreme States
+    float KillThresh  = ExtremeSlopeBlock.GetFloat();
+    bool IsExtremeUp  = (CurrentSlope > KillThresh);
+    bool IsExtremeDown= (CurrentSlope < -KillThresh);
 
-    // States for Setup D
-    bool IsExtremeUp    = (CurrentSlope > ExtremeThresh);
-    bool IsExtremeDown  = (CurrentSlope < -ExtremeThresh);
+    bool KillSwitchLong  = IsExtremeDown;
+    bool KillSwitchShort = IsExtremeUp;
 
-    // Kill Switch Logic (Standard Reversion is blocked)
-    bool BlockStandardLong  = IsExtremeDown; // Don't catch falling knife
-    bool BlockStandardShort = IsExtremeUp;   // Don't short melt-up
+    // 4. Chop
+    int FlipCount = 0;
+    int Lookback  = ChopLookback.GetInt();
+
+    for (int i = 0; i < Lookback; i++)
+    {
+        int idx = sc.Index - i;
+        if (idx <= 0)
+            break;
+
+        float sCurrent = VWAP_Slope[idx];
+        float sPrev    = VWAP_Slope[idx-1];
+
+        if ((sCurrent > 0 && sPrev < 0) || (sCurrent < 0 && sPrev > 0))
+        {
+            FlipCount++;
+        }
+    }
+
+    bool IsChoppy = (FlipCount > MaxSlopeFlips.GetInt());
+    ChopState[sc.Index] = IsChoppy ? 1.0f : 0.0f;
 
     // =========================================================================
     // 7. INDICATORS & SCORING
@@ -328,97 +370,83 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     Score[sc.Index] = (float)totalScore;
 
     // =========================================================================
-    // 8. TRADE MANAGEMENT
+    // 8. VIRTUAL TRADE STATE (Visual Backtesting)
     // =========================================================================
 
+    // A. Check Virtual Exits
+    if (VirtPos != 0)
+    {
+        VisTarget[sc.Index] = (float)VirtTargetPrice;
+        VisStop[sc.Index]   = (float)VirtStopPrice;
+
+        bool Exit = false;
+
+        if (VirtPos == 1) // Long
+        {
+            if (sc.Low[sc.Index] <= VirtStopPrice)
+            {
+                Exit = true;
+            }
+            else if (sc.High[sc.Index] >= VirtTargetPrice)
+            {
+                Exit = true;
+            }
+
+            // Virtual Trailing
+            if (!Exit && (sc.Close[sc.Index] - VirtEntryPrice) > (TrailTriggerATR.GetFloat() * ATR[sc.Index]))
+            {
+                float NewStop = sc.Close[sc.Index] - (TrailDistATR.GetFloat() * ATR[sc.Index]);
+                if (NewStop > VirtStopPrice)
+                    VirtStopPrice = NewStop;
+            }
+        }
+        else if (VirtPos == -1) // Short
+        {
+            if (sc.High[sc.Index] >= VirtStopPrice)
+            {
+                Exit = true;
+            }
+            else if (sc.Low[sc.Index] <= VirtTargetPrice)
+            {
+                Exit = true;
+            }
+
+            // Virtual Trailing
+            if (!Exit && (VirtEntryPrice - sc.Close[sc.Index]) > (TrailTriggerATR.GetFloat() * ATR[sc.Index]))
+            {
+                float NewStop = sc.Close[sc.Index] + (TrailDistATR.GetFloat() * ATR[sc.Index]);
+                if (NewStop < VirtStopPrice)
+                    VirtStopPrice = NewStop;
+            }
+        }
+
+        if (Exit)
+        {
+            VirtPos = 0; // Trade Closed
+            LastExitIndex = sc.Index; // Mark exit bar for cooldown
+        }
+    }
+
+    // B. Sync with Real Trading (If Active)
     s_SCPositionData PosData;
     sc.GetTradePosition(PosData);
 
     if (PosData.PositionQuantity != 0)
     {
-        double PnL = PosData.PositionQuantity > 0
-            ? (sc.Close[sc.Index] - PosData.AveragePrice)
-            : (PosData.AveragePrice - sc.Close[sc.Index]);
-
-        double CurATR = ATR[sc.Index];
-
-        // --- Trailing Stop ---
-        if (CurATR > 0 && PnL >= (TrailTriggerATR.GetFloat() * CurATR))
-        {
-            double NewStop = (PosData.PositionQuantity > 0)
-                ? sc.Close[sc.Index] - (TrailDistATR.GetFloat() * CurATR)
-                : sc.Close[sc.Index] + (TrailDistATR.GetFloat() * CurATR);
-
-            int idx = 0;
-            s_SCTradeOrder Ord;
-            while (sc.GetOrderByIndex(idx, Ord) != SCTRADING_ORDER_ERROR)
-            {
-                if (Ord.OrderStatusCode == SCT_OSC_OPEN && Ord.Symbol == sc.Symbol)
-                {
-                    bool IsStop = (PosData.PositionQuantity > 0 && Ord.OrderType == SCT_ORDERTYPE_STOP && Ord.BuySell == BSE_SELL) ||
-                                  (PosData.PositionQuantity < 0 && Ord.OrderType == SCT_ORDERTYPE_STOP && Ord.BuySell == BSE_BUY);
-
-                    if (IsStop)
-                    {
-                        bool Better = (PosData.PositionQuantity > 0 && NewStop > Ord.Price1) ||
-                                      (PosData.PositionQuantity < 0 && NewStop < Ord.Price1);
-
-                        if (Better)
-                        {
-                            s_SCNewOrder Mod;
-                            Mod.InternalOrderID = Ord.InternalOrderID;
-                            Mod.Price1 = NewStop;
-                            sc.ModifyOrder(Mod);
-                        }
-                    }
-                }
-                idx++;
-            }
-        }
-
-        // --- Dynamic Target ---
-        bool ExtTgt = (PosData.PositionQuantity > 0 && CCI[sc.Index] < 80) ||
-                      (PosData.PositionQuantity < 0 && CCI[sc.Index] > -80);
-
-        if (ExtTgt)
-        {
-            double NewTgt = (PosData.PositionQuantity > 0)
-                ? PosData.AveragePrice + (ExtTargetATRMult.GetFloat() * CurATR)
-                : PosData.AveragePrice - (ExtTargetATRMult.GetFloat() * CurATR);
-
-            int idx = 0;
-            s_SCTradeOrder Ord;
-            while (sc.GetOrderByIndex(idx, Ord) != SCTRADING_ORDER_ERROR)
-            {
-                if (Ord.OrderStatusCode == SCT_OSC_OPEN && Ord.Symbol == sc.Symbol)
-                {
-                    bool IsTgt = (PosData.PositionQuantity > 0 && Ord.OrderType == SCT_ORDERTYPE_LIMIT && Ord.BuySell == BSE_SELL) ||
-                                 (PosData.PositionQuantity < 0 && Ord.OrderType == SCT_ORDERTYPE_LIMIT && Ord.BuySell == BSE_BUY);
-
-                    if (IsTgt)
-                    {
-                        bool Move = (PosData.PositionQuantity > 0 && NewTgt > Ord.Price1) ||
-                                    (PosData.PositionQuantity < 0 && NewTgt < Ord.Price1);
-
-                        if (Move)
-                        {
-                            s_SCNewOrder Mod;
-                            Mod.InternalOrderID = Ord.InternalOrderID;
-                            Mod.Price1 = NewTgt;
-                            sc.ModifyOrder(Mod);
-                        }
-                    }
-                }
-                idx++;
-            }
-        }
+        VirtPos = (PosData.PositionQuantity > 0) ? 1 : -1;
     }
 
     // =========================================================================
-    // 9. LOGIC DEFINITIONS
+    // 9. LOGIC & SIGNALS
     // =========================================================================
 
     if (sc.GetBarHasClosedStatus() != BHCS_BAR_HAS_CLOSED) return;
+
+    // *** BLOCKER: No signals if trade (Virtual or Real) is active ***
+    if (VirtPos != 0) return;
+
+    // *** MINIMUM SPACING: Only allow signals every N bars ***
+    if ((sc.Index - LastSignalIndex) < MinBarsBetweenTrades.GetInt()) return;
 
     bool InRTH = true;
     if (TradeRTHOnly.GetYesNo())
@@ -431,155 +459,133 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     bool CCIBuy  = CCI[sc.Index] > -100 && CCI[sc.Index-1] <= -100;
     bool CCISell = CCI[sc.Index] < 100 && CCI[sc.Index-1] >= 100;
 
-    // --- Band Zone Logic ---
     bool AtBot20 = sc.Close[sc.Index] < Band_Bot_20[sc.Index];
     bool AtTop20 = sc.Close[sc.Index] > Band_Top_20[sc.Index];
 
-    // --- Shallow Pullback Zones (Setup C) ---
     bool InShallowLongZone  = (sc.Low[sc.Index] <= Band_Bot_05) && (sc.Close[sc.Index] >= Band_Bot_20[sc.Index]);
     bool InShallowShortZone = (sc.High[sc.Index] >= Band_Top_05) && (sc.Close[sc.Index] <= Band_Top_20[sc.Index]);
 
     bool CandleBullish      = sc.Close[sc.Index] > sc.Open[sc.Index-1];
     bool CandleBearish      = sc.Close[sc.Index] < sc.Open[sc.Index-1];
+    bool TouchedSMA         = (sc.Low[sc.Index] <= SMA100[sc.Index] && sc.High[sc.Index] >= SMA100[sc.Index]);
 
-    // --- SMA Confluence Logic ---
-    bool TouchedSMA = (sc.Low[sc.Index] <= SMA100[sc.Index] && sc.High[sc.Index] >= SMA100[sc.Index]);
-
-    // --- Breakout Levels (Setup D) ---
-    float Highest5 = sc.GetHighest(sc.High, 5, sc.Index - 1); // Prev 5 bars high
-    float Lowest5  = sc.GetLowest(sc.Low, 5, sc.Index - 1);   // Prev 5 bars low
-
-    // =========================================================================
-    // 10. ENTRY LOGIC SETUP
-    // =========================================================================
+    float Highest5          = sc.GetHighest(sc.High, 5, sc.Index - 1);
+    float Lowest5           = sc.GetLowest(sc.Low, 5, sc.Index - 1);
 
     // --- SETUP A: MOMENTUM ---
     bool SetupA_Long  = (totalScore < 70 && CCIBuy);
-    bool SetupA_Short = (totalScore > 130 && totalScore < 190 && CCISell);
+    if (IsChoppy || StrongDown || IsExtremeDown) SetupA_Long = false;
 
-    // Filter A with Trend
-    if (StrongDown) SetupA_Long = false;
-    if (StrongUp) SetupA_Short = false;
+    bool SetupA_Short = (totalScore > 130 && totalScore < 190 && CCISell);
+    if (IsChoppy || StrongUp || IsExtremeUp)     SetupA_Short = false;
 
     // --- SETUP B: EXTREME REVERSION (2.0 SD) ---
-    // Gate: Slope must turn back towards 0 (Gate > 2.0 or < -2.0)
     float GateVal = SetupBSlopeGate.GetFloat();
-
     bool SetupB_Long  = AtBot20 && CandleBullish && (CurrentSlope > GateVal);
     bool SetupB_Short = AtTop20 && CandleBearish && (CurrentSlope < -GateVal);
 
-    // --- SETUP C: TREND PULLBACK (SMA + 0.5 SD) ---
+    // --- SETUP C: TREND PULLBACK ---
     bool SetupC_Long = false;
-    if (StrongUp && InShallowLongZone && TouchedSMA && CandleBullish)
+    if (!IsChoppy && StrongUp && InShallowLongZone && TouchedSMA && CandleBullish)
     {
         SetupC_Long = true;
     }
 
     bool SetupC_Short = false;
-    if (StrongDown && InShallowShortZone && TouchedSMA && CandleBearish)
+    if (!IsChoppy && StrongDown && InShallowShortZone && TouchedSMA && CandleBearish)
     {
         SetupC_Short = true;
     }
 
-    // --- SETUP D: EXTREME BREAKOUT (NEW) ---
-    // Condition: Slope Extreme + EMA Confirm + Breakout
+    // --- SETUP D: EXTREME BREAKOUT ---
     bool SetupD_Long = false;
-    if (IsExtremeUp && sc.Close[sc.Index] > EMA50[sc.Index] && sc.Close[sc.Index] > Highest5)
+    if (!IsChoppy && IsExtremeUp && sc.Close[sc.Index] > EMA50[sc.Index] && sc.Close[sc.Index] > Highest5)
     {
-        SetupD_Long = true; // Breakout Long
+        SetupD_Long = true;
     }
 
     bool SetupD_Short = false;
-    if (IsExtremeDown && sc.Close[sc.Index] < EMA50[sc.Index] && sc.Close[sc.Index] < Lowest5)
+    if (!IsChoppy && IsExtremeDown && sc.Close[sc.Index] < EMA50[sc.Index] && sc.Close[sc.Index] < Lowest5)
     {
-        SetupD_Short = true; // Breakout Short
+        SetupD_Short = true;
     }
 
-    // --- FINAL TRIGGER ---
+    // --- TRIGGERS ---
+    bool DoLong  = InRTH && (SetupA_Long || SetupB_Long || SetupC_Long || SetupD_Long);
+    if (IsExtremeDown && !SetupD_Long) DoLong = false;
 
-    // 1. Accumulate Longs
-    bool DoLong = InRTH && (SetupA_Long || SetupB_Long || SetupC_Long || SetupD_Long);
-
-    // SAFETY BLOCK: If Extreme Down Slope, ONLY Setup D (Breakout Short) is valid logic,
-    // but here we are checking Longs. So we BLOCK Longs unless it's a specific counter-logic (which Setup B handles).
-    // However, Setup B has a Gate. If slope is <-8, Setup B requires Slope > 2 to fire, so it's safe.
-    // The Kill Switch "BlockStandardLong" applies to non-gated or weak setups.
-    if (BlockStandardLong)
-    {
-        // Block A and C. B is self-gated. D is Short-only in this state.
-        // So effectively all longs are blocked until Slope recovers.
-        DoLong = false;
-    }
-
-    // 2. Accumulate Shorts
     bool DoShort = InRTH && (SetupA_Short || SetupB_Short || SetupC_Short || SetupD_Short);
+    if (IsExtremeUp && !SetupD_Short) DoShort = false;
 
-    if (BlockStandardShort)
-    {
-        DoShort = false;
-    }
+    // Target Selection Logic
+    float SlopeMag = (CurrentSlope > 0) ? CurrentSlope : -CurrentSlope;
+    float UsedMult = (SlopeMag > MinSlopeThreshold.GetFloat())
+        ? ExtTargetATRMult.GetFloat()
+        : TargetATRMult.GetFloat();
 
-    // --- Override Block for Setup D ---
-    // If we have a valid Setup D (Breakout), we MUST allow it even if we are in "Extreme" mode.
-    // Actually, Setup D *requires* Extreme mode.
-    // So:
-    if (SetupD_Long && InRTH) DoLong = true;
-    if (SetupD_Short && InRTH) DoShort = true;
+    // =========================================================================
+    // 10. EXECUTION & VIRTUAL UPDATE
+    // =========================================================================
 
-
-    // --- Visuals ---
     if (DoLong)
-        LongSignal[sc.Index] = sc.Low[sc.Index] - (ATR[sc.Index] * 0.5f);
-
-    if (DoShort)
-        ShortSignal[sc.Index] = sc.High[sc.Index] + (ATR[sc.Index] * 0.5f);
-
-    // =========================================================================
-    // 11. ENTRY EXECUTION
-    // =========================================================================
-
-    if (DailyCount < MaxDailyTrades.GetInt() && InRTH)
     {
-        if (PosData.PositionQuantity == 0 && sc.Index != LastTradeIndex)
+        // 1. Paint Signal & Mark
+        LongSignal[sc.Index] = sc.Low[sc.Index] - (ATR[sc.Index] * 0.5f);
+        LastSignalIndex = sc.Index;
+
+        // 2. Set Virtual State
+        VirtPos         = 1;
+        VirtEntryPrice  = sc.Close[sc.Index];
+        VirtStopPrice   = sc.Close[sc.Index] * (1.0f - (HardStopPercent.GetFloat() / 100.0f));
+        VirtTargetPrice = sc.Close[sc.Index] + (UsedMult * ATR[sc.Index]);
+
+        // 3. Real Execution
+        if (DailyCount < MaxDailyTrades.GetInt() && sc.SendOrdersToTradeService)
         {
             s_SCNewOrder Order;
             Order.OrderQuantity          = ContractsPerTrade.GetInt();
             Order.OrderType              = SCT_ORDERTYPE_MARKET;
             Order.TimeInForce            = SCT_TIF_GOOD_TILL_CANCELED;
-
-            double StopOffset            = sc.Close[sc.Index] * (HardStopPercent.GetFloat() / 100.0f);
-            Order.Stop1Offset            = StopOffset;
-
-            Order.Target1Offset          = TargetATRMult.GetFloat() * ATR[sc.Index];
-
+            Order.Stop1Offset            = sc.Close[sc.Index] * (HardStopPercent.GetFloat() / 100.0f);
+            Order.Target1Offset          = UsedMult * ATR[sc.Index];
             Order.AttachedOrderTarget1Type = SCT_ORDERTYPE_LIMIT;
             Order.AttachedOrderStop1Type   = SCT_ORDERTYPE_STOP;
 
-            if (DoLong)
+            if (sc.BuyEntry(Order) > 0)
             {
-                if (sc.BuyEntry(Order) > 0)
-                {
-                    DailyCount++;
-                    LastTradeIndex = sc.Index;
-
-                    SCString msg;
-                    msg.Format("XYL V21: LONG (A:%d B:%d C:%d D:%d Sc:%d)",
-                        SetupA_Long, SetupB_Long, SetupC_Long, SetupD_Long, totalScore);
-                    sc.AddMessageToLog(msg, 1);
-                }
+                DailyCount++;
+                LastTradeIndex = sc.Index;
             }
-            else if (DoShort)
-            {
-                if (sc.SellEntry(Order) > 0)
-                {
-                    DailyCount++;
-                    LastTradeIndex = sc.Index;
+        }
+    }
+    else if (DoShort)
+    {
+        // 1. Paint Signal & Mark
+        ShortSignal[sc.Index] = sc.High[sc.Index] + (ATR[sc.Index] * 0.5f);
+        LastSignalIndex = sc.Index;
 
-                    SCString msg;
-                    msg.Format("XYL V21: SHORT (A:%d B:%d C:%d D:%d Sc:%d)",
-                        SetupA_Short, SetupB_Short, SetupC_Short, SetupD_Short, totalScore);
-                    sc.AddMessageToLog(msg, 1);
-                }
+        // 2. Set Virtual State
+        VirtPos         = -1;
+        VirtEntryPrice  = sc.Close[sc.Index];
+        VirtStopPrice   = sc.Close[sc.Index] * (1.0f + (HardStopPercent.GetFloat() / 100.0f));
+        VirtTargetPrice = sc.Close[sc.Index] - (UsedMult * ATR[sc.Index]);
+
+        // 3. Real Execution
+        if (DailyCount < MaxDailyTrades.GetInt() && sc.SendOrdersToTradeService)
+        {
+            s_SCNewOrder Order;
+            Order.OrderQuantity          = ContractsPerTrade.GetInt();
+            Order.OrderType              = SCT_ORDERTYPE_MARKET;
+            Order.TimeInForce            = SCT_TIF_GOOD_TILL_CANCELED;
+            Order.Stop1Offset            = sc.Close[sc.Index] * (HardStopPercent.GetFloat() / 100.0f);
+            Order.Target1Offset          = UsedMult * ATR[sc.Index];
+            Order.AttachedOrderTarget1Type = SCT_ORDERTYPE_LIMIT;
+            Order.AttachedOrderStop1Type   = SCT_ORDERTYPE_STOP;
+
+            if (sc.SellEntry(Order) > 0)
+            {
+                DailyCount++;
+                LastTradeIndex = sc.Index;
             }
         }
     }
