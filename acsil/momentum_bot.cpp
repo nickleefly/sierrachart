@@ -2,6 +2,25 @@
 
 SCDLLName("XYL - Momentum Bot")
 
+/*
+    TRADING SETUPS:
+
+    Setup A (Momentum): Classic mean reversion using CCI crosses gated by
+    extreme Momentum Score (<70/>130), strictly disabled against strong trends.
+    Setup B (Extreme Reversion): Statistical exhaustion play at 2.0 SD bands
+    with Candle Reversal, requiring Price Slope confirmation (Gate > 0.05%)
+    to validate the turn.
+    Setup C (Trend Pullback): "Buy the Dip" logic triggering on SMA 100 touches
+    during Strong Trends (Slope > 0.10%) while price remains in the shallow zone.
+    Setup D (Extreme Breakout): Trend-following mode for violent moves
+    (Slope > 0.25% or < -0.25%) using EMA 50 confirmation and 5-bar swing breakouts.
+    FILTERS:
+    - Chop Detection: Blocks A/C/D when slope flips > 2 times in 10 bars
+    - Signal Spacing: Min 5 bars between signals
+    - Virtual Position: Tracks trades to prevent clustering
+*/
+
+
 SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 {
     // =========================================================================
