@@ -124,23 +124,23 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         SendOrdersToService.Name = "Send Orders to Trade Service";
         SendOrdersToService.SetYesNo(false);
 
-        MinSlopeThreshold.Name = "Trend Detection Slope";
-        MinSlopeThreshold.SetFloat(0.20f);
+        MinSlopeThreshold.Name = "Trend Detection Slope (%)";
+        MinSlopeThreshold.SetFloat(0.10f); // ~7 pts on ES, ~26 pts on NQ
 
-        ExtremeSlopeBlock.Name = "Kill Switch Slope";
-        ExtremeSlopeBlock.SetFloat(8.0f);
+        ExtremeSlopeBlock.Name = "Kill Switch Slope (%)";
+        ExtremeSlopeBlock.SetFloat(0.25f); // ~17 pts on ES, ~64 pts on NQ
 
-        SetupBSlopeGate.Name = "Setup B Reversion Gate";
-        SetupBSlopeGate.SetFloat(2.0f);
+        SetupBSlopeGate.Name = "Setup B Reversion Gate (%)";
+        SetupBSlopeGate.SetFloat(0.05f); // ~3 pts on ES, ~13 pts on NQ
 
         ChopLookback.Name = "Chop Detection Lookback";
         ChopLookback.SetInt(10);
 
         MaxSlopeFlips.Name = "Max Slope Flips Allowed";
-        MaxSlopeFlips.SetInt(3);
+        MaxSlopeFlips.SetInt(5);
 
         MinBarsBetweenTrades.Name = "Min Bars Between Signals";
-        MinBarsBetweenTrades.SetInt(10);
+        MinBarsBetweenTrades.SetInt(5); // Reduced from 10
 
         // --- Visuals ---
         Band_Top_20.Name = "T2 std";
@@ -275,8 +275,9 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     sc.ExponentialMovAvg(sc.Close, EMA1000, sc.Index, 1000);
     sc.ExponentialMovAvg(sc.Close, EMA50, sc.Index, 50);
 
-    // 1. Slope
-    float CurrentSlope = VWAP[sc.Index] - VWAP[sc.Index - 5];
+    // 1. Slope (percentage of VWAP for cross-instrument compatibility)
+    float AbsoluteSlope = VWAP[sc.Index] - VWAP[sc.Index - 5];
+    float CurrentSlope = (VWAP[sc.Index] > 0) ? (AbsoluteSlope / VWAP[sc.Index]) * 100.0f : 0.0f;
     VWAP_Slope[sc.Index] = CurrentSlope;
 
     // 2. Trend States
@@ -288,9 +289,6 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     float KillThresh  = ExtremeSlopeBlock.GetFloat();
     bool IsExtremeUp  = (CurrentSlope > KillThresh);
     bool IsExtremeDown= (CurrentSlope < -KillThresh);
-
-    bool KillSwitchLong  = IsExtremeDown;
-    bool KillSwitchShort = IsExtremeUp;
 
     // 4. Chop
     int FlipCount = 0;
