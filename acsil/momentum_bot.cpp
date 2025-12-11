@@ -34,7 +34,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     SCSubgraphRef EMA50         = sc.Subgraph[25];
 
     // --- Hidden Data ---
-    SCSubgraphRef VWAP_Slope    = sc.Subgraph[26];
+    SCSubgraphRef PriceSlope    = sc.Subgraph[26];
     SCSubgraphRef TrendLineZero = sc.Subgraph[27];
     SCSubgraphRef ChopState     = sc.Subgraph[28];
 
@@ -138,7 +138,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         ChopLookback.SetInt(10);
 
         MaxSlopeFlips.Name = "Max Slope Flips Allowed";
-        MaxSlopeFlips.SetInt(5);
+        MaxSlopeFlips.SetInt(3);  // Lower = more sensitive chop detection
 
         MinBarsBetweenTrades.Name = "Min Bars Between Signals";
         MinBarsBetweenTrades.SetInt(5); // Reduced from 10
@@ -197,13 +197,13 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         EMA50.Name = "EMA 50";
         EMA50.DrawStyle = DRAWSTYLE_IGNORE;
 
-        VWAP_Slope.Name = "VWAP Slope";
-        VWAP_Slope.DrawStyle = DRAWSTYLE_HIDDEN;
+        PriceSlope.Name = "Price Slope (%)";
+        PriceSlope.DrawStyle = DRAWSTYLE_HIDDEN;
 
         TrendLineZero.Name = "Zero";
         TrendLineZero.DrawStyle = DRAWSTYLE_IGNORE;
 
-        ChopState.Name = "Chop State";
+        ChopState.Name = "Chop (1=True)";
         ChopState.DrawStyle = DRAWSTYLE_HIDDEN;
 
         sc.AllowMultipleEntriesInSameDirection = 0;
@@ -302,10 +302,16 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     sc.ExponentialMovAvg(sc.Close, EMA1000, sc.Index, 1000);
     sc.ExponentialMovAvg(sc.Close, EMA50, sc.Index, 50);
 
-    // 1. Slope (percentage of VWAP for cross-instrument compatibility)
-    float AbsoluteSlope = VWAP[sc.Index] - VWAP[sc.Index - 5];
-    float CurrentSlope = (VWAP[sc.Index] > 0) ? (AbsoluteSlope / VWAP[sc.Index]) * 100.0f : 0.0f;
-    VWAP_Slope[sc.Index] = CurrentSlope;
+    // 1. Slope (percentage of price movement for cross-instrument compatibility)
+    float CurrentSlope = 0.0f;
+    if (sc.Index >= 5 && sc.Close[sc.Index] > 0 && sc.Close[sc.Index - 5] > 0)
+    {
+        float PriceNow = sc.Close[sc.Index];
+        float PricePrev = sc.Close[sc.Index - 5];
+        float AbsoluteSlope = PriceNow - PricePrev;
+        CurrentSlope = (AbsoluteSlope / PriceNow) * 100.0f;
+    }
+    PriceSlope[sc.Index] = CurrentSlope;
 
     // 2. Trend States
     float TrendThresh = MinSlopeThreshold.GetFloat();
@@ -317,7 +323,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     bool IsExtremeUp  = (CurrentSlope > KillThresh);
     bool IsExtremeDown= (CurrentSlope < -KillThresh);
 
-    // 4. Chop
+    // 4. Chop Detection
     int FlipCount = 0;
     int Lookback  = ChopLookback.GetInt();
 
@@ -327,8 +333,8 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         if (idx <= 0)
             break;
 
-        float sCurrent = VWAP_Slope[idx];
-        float sPrev    = VWAP_Slope[idx-1];
+        float sCurrent = PriceSlope[idx];
+        float sPrev    = PriceSlope[idx-1];
 
         if ((sCurrent > 0 && sPrev < 0) || (sCurrent < 0 && sPrev > 0))
         {
@@ -337,7 +343,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     }
 
     bool IsChoppy = (FlipCount > MaxSlopeFlips.GetInt());
-    ChopState[sc.Index] = IsChoppy ? 1.0f : 0.0f;
+    ChopState[sc.Index] = IsChoppy ? 1.0f : 0.0f;  // 1.0 = True (Choppy), 0.0 = False
 
     // =========================================================================
     // 7. INDICATORS & SCORING
