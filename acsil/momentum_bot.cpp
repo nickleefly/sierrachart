@@ -3,12 +3,14 @@
 SCDLLName("XYL - Momentum Bot")
 
 /*
-    CHANGELOG:
-    1. REFACTOR:
-       - Setup A: Momentum (CCI + Score).
-       - Setup B: Extreme Reversion (2.0 SD).
-       - Setup C: Trend Pullback (SMA 100 + 0.5 SD Internal).
-    2. LOGIC: Maintained strict slope filters and kill switches.
+CHANGELOG V21:
+Setup A (Momentum): Classic mean reversion using CCI crosses gated by extreme Momentum Score (<70/>130), strictly disabled against strong trends.
+
+Setup B (Extreme Reversion): Statistical exhaustion play at 2.0 SD bands with Candle Reversal, requiring VWAP Slope confirmation (Gate > 2.0) to validate the turn.
+
+Setup C (Trend Pullback): "Buy the Dip" logic triggering on SMA 100 touches during Strong Trends (Slope > 0.2) while price remains in the shallow zone.
+
+Setup D (Extreme Breakout): Trend-following mode for violent moves (Slope > 8.0 or < -8.0) using EMA 50 confirmation and 5-bar swing breakouts.
 */
 
 SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
@@ -40,10 +42,11 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     SCSubgraphRef CumDelta      = sc.Subgraph[22];
     SCSubgraphRef CCITempSMA    = sc.Subgraph[23];
     SCSubgraphRef ATR20         = sc.Subgraph[24];
+    SCSubgraphRef EMA50         = sc.Subgraph[25]; // Explicit EMA 50 for Setup D
 
     // --- Hidden Data ---
-    SCSubgraphRef VWAP_Slope    = sc.Subgraph[25];
-    SCSubgraphRef TrendLineZero = sc.Subgraph[26];
+    SCSubgraphRef VWAP_Slope    = sc.Subgraph[26];
+    SCSubgraphRef TrendLineZero = sc.Subgraph[27];
 
     // =========================================================================
     // 2. PERSISTENT VARIABLES
@@ -70,8 +73,9 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     SCInputRef ATRLength           = sc.Input[7];
     SCInputRef TradeRTHOnly        = sc.Input[8];
     SCInputRef SendOrdersToService = sc.Input[9];
-    SCInputRef MinSlopeThreshold   = sc.Input[10];
-    SCInputRef ExtremeSlopeBlock   = sc.Input[11];
+    SCInputRef MinSlopeThreshold   = sc.Input[10]; // 0.20
+    SCInputRef ExtremeSlopeBlock   = sc.Input[11]; // 8.0
+    SCInputRef SetupBSlopeGate     = sc.Input[12]; // 2.0
 
     // =========================================================================
     // 4. CONFIGURATION (SetDefaults)
@@ -79,14 +83,14 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
     if (sc.SetDefaults)
     {
-        sc.GraphName        = "XYL - Momentum Bot V19 (Renamed Setups)";
+        sc.GraphName        = "XYL - Momentum Bot";
         sc.GraphRegion      = 0;
         sc.AutoLoop         = 1;
         sc.UpdateAlways     = 1;
 
         // --- Inputs Configuration ---
         MaxDailyTrades.Name = "Max Daily Trades";
-        MaxDailyTrades.SetInt(5);
+        MaxDailyTrades.SetInt(15);
 
         ContractsPerTrade.Name = "Contracts Per Trade";
         ContractsPerTrade.SetInt(1);
@@ -115,20 +119,23 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         SendOrdersToService.Name = "Send Orders to Trade Service";
         SendOrdersToService.SetYesNo(false);
 
-        MinSlopeThreshold.Name = "Trend Detection Slope";
+        MinSlopeThreshold.Name = "Trend Detection Slope (0.2)";
         MinSlopeThreshold.SetFloat(0.20f);
 
-        ExtremeSlopeBlock.Name = "Kill Switch Slope";
+        ExtremeSlopeBlock.Name = "Extreme/Breakout Slope (8.0)";
         ExtremeSlopeBlock.SetFloat(8.0f);
 
+        SetupBSlopeGate.Name = "Setup B Reversion Gate (2.0)";
+        SetupBSlopeGate.SetFloat(2.0f);
+
         // --- Visual Bands Configuration ---
-        Band_Top_20.Name = "Top 2.0 SD";
-        Band_Top_20.DrawStyle = DRAWSTYLE_LINE;
+        Band_Top_20.Name = "T2 std";
+        Band_Top_20.DrawStyle = DRAWSTYLE_HIDDEN;
         Band_Top_20.PrimaryColor = RGB(255, 0, 0);
         Band_Top_20.LineWidth = 2;
 
-        Band_Bot_20.Name = "Bot 2.0 SD";
-        Band_Bot_20.DrawStyle = DRAWSTYLE_IGNORE; // Hidden
+        Band_Bot_20.Name = "B2 std";
+        Band_Bot_20.DrawStyle = DRAWSTYLE_HIDDEN;
         Band_Bot_20.PrimaryColor = RGB(0, 255, 0);
         Band_Bot_20.LineWidth = 2;
 
@@ -143,24 +150,25 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         ShortSignal.PrimaryColor = RGB(255, 0, 0);
         ShortSignal.LineWidth = 4;
 
-        // --- Hidden Subgraphs ---
+        // --- Slope Visuals ---
         VWAP_Slope.Name = "VWAP 5-Bar Slope";
-        VWAP_Slope.DrawStyle = DRAWSTYLE_IGNORE;
+        VWAP_Slope.DrawStyle = DRAWSTYLE_HIDDEN;
 
         TrendLineZero.Name = "Slope Zero Line";
         TrendLineZero.DrawStyle = DRAWSTYLE_IGNORE;
 
+        // --- Hidden Subgraphs ---
         VWAP.Name = "VWAP";
         VWAP.DrawStyle = DRAWSTYLE_IGNORE;
 
         RSI.Name = "RSI";
-        RSI.DrawStyle = DRAWSTYLE_IGNORE;
+        RSI.DrawStyle = DRAWSTYLE_HIDDEN;
 
         CCI.Name = "CCI";
-        CCI.DrawStyle = DRAWSTYLE_IGNORE;
+        CCI.DrawStyle = DRAWSTYLE_HIDDEN;
 
         ATR.Name = "ATR";
-        ATR.DrawStyle = DRAWSTYLE_IGNORE;
+        ATR.DrawStyle = DRAWSTYLE_HIDDEN;
 
         SMA100.Name = "SMA 100";
         SMA100.DrawStyle = DRAWSTYLE_LINE;
@@ -168,6 +176,9 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
         EMA1000.Name = "EMA 1000";
         EMA1000.DrawStyle = DRAWSTYLE_IGNORE;
+
+        EMA50.Name = "EMA 50";
+        EMA50.DrawStyle = DRAWSTYLE_IGNORE; // Used for Logic D
 
         // --- System Flags ---
         sc.AllowMultipleEntriesInSameDirection = 0;
@@ -224,40 +235,42 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         VWAP[sc.Index] = Price;
     }
 
-    // --- Main Bands (Only 2.0 Used) ---
+    // --- Bands ---
     Band_Top_20[sc.Index] = VWAP[sc.Index] + (2.0f * StdDev);
     Band_Bot_20[sc.Index] = VWAP[sc.Index] - (2.0f * StdDev);
 
-    // --- Shallow Bands (Setup C Internal - 0.5 SD) ---
+    // --- Shallow Bands (Setup C Internal) ---
     float Band_Top_05 = VWAP[sc.Index] + (0.5f * StdDev);
     float Band_Bot_05 = VWAP[sc.Index] - (0.5f * StdDev);
 
     // =========================================================================
-    // 6. TREND & KILL SWITCH
+    // 6. TREND & EXTREME STATES
     // =========================================================================
 
     sc.SimpleMovAvg(sc.Close, SMA100, sc.Index, 100);
     sc.ExponentialMovAvg(sc.Close, EMA1000, sc.Index, 1000);
+    sc.ExponentialMovAvg(sc.Close, EMA50, sc.Index, 50); // For Setup D
 
     // 1. Slope Calculation (5-Bar)
     float CurrentSlope = VWAP[sc.Index] - VWAP[sc.Index - 5];
     VWAP_Slope[sc.Index] = CurrentSlope;
     TrendLineZero[sc.Index] = 0.0f;
 
-    // 2. Trend Sensitivity
+    // 2. Standard Trend Thresholds (0.2)
     float TrendThresh = MinSlopeThreshold.GetFloat();
     bool StrongUp     = (CurrentSlope > TrendThresh);
     bool StrongDown   = (CurrentSlope < -TrendThresh);
 
-    // 3. Kill Switch Thresholds
-    float KillThresh  = ExtremeSlopeBlock.GetFloat();
+    // 3. Extreme Thresholds (8.0)
+    float ExtremeThresh = ExtremeSlopeBlock.GetFloat();
 
-    // BLOCK LOGIC
-    // If Slope < -8.0, Longs are FORBIDDEN
-    bool KillSwitchLong = (CurrentSlope < -KillThresh);
+    // States for Setup D
+    bool IsExtremeUp    = (CurrentSlope > ExtremeThresh);
+    bool IsExtremeDown  = (CurrentSlope < -ExtremeThresh);
 
-    // If Slope > 8.0, Shorts are FORBIDDEN
-    bool KillSwitchShort = (CurrentSlope > KillThresh);
+    // Kill Switch Logic (Standard Reversion is blocked)
+    bool BlockStandardLong  = IsExtremeDown; // Don't catch falling knife
+    bool BlockStandardShort = IsExtremeUp;   // Don't short melt-up
 
     // =========================================================================
     // 7. INDICATORS & SCORING
@@ -422,8 +435,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     bool AtBot20 = sc.Close[sc.Index] < Band_Bot_20[sc.Index];
     bool AtTop20 = sc.Close[sc.Index] > Band_Top_20[sc.Index];
 
-    // --- Shallow Pullback Zone Logic (Setup C Internal) ---
-    // Price must be below 0.5 internal bands (Dip) but above Bottom 2.0
+    // --- Shallow Pullback Zones (Setup C) ---
     bool InShallowLongZone  = (sc.Low[sc.Index] <= Band_Bot_05) && (sc.Close[sc.Index] >= Band_Bot_20[sc.Index]);
     bool InShallowShortZone = (sc.High[sc.Index] >= Band_Top_05) && (sc.Close[sc.Index] <= Band_Top_20[sc.Index]);
 
@@ -433,47 +445,89 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     // --- SMA Confluence Logic ---
     bool TouchedSMA = (sc.Low[sc.Index] <= SMA100[sc.Index] && sc.High[sc.Index] >= SMA100[sc.Index]);
 
+    // --- Breakout Levels (Setup D) ---
+    float Highest5 = sc.GetHighest(sc.High, 5, sc.Index - 1); // Prev 5 bars high
+    float Lowest5  = sc.GetLowest(sc.Low, 5, sc.Index - 1);   // Prev 5 bars low
+
     // =========================================================================
     // 10. ENTRY LOGIC SETUP
     // =========================================================================
 
-    // --- SETUP A: MOMENTUM (Classic) ---
+    // --- SETUP A: MOMENTUM ---
     bool SetupA_Long  = (totalScore < 70 && CCIBuy);
-    if (StrongDown) SetupA_Long = false; // Block Longs if Counter Trend
-
     bool SetupA_Short = (totalScore > 130 && totalScore < 190 && CCISell);
-    if (StrongUp) SetupA_Short = false; // Block Shorts if Counter Trend
+
+    // Filter A with Trend
+    if (StrongDown) SetupA_Long = false;
+    if (StrongUp) SetupA_Short = false;
 
     // --- SETUP B: EXTREME REVERSION (2.0 SD) ---
-    bool SetupB_Long  = AtBot20 && CandleBullish;
-    bool SetupB_Short = AtTop20 && CandleBearish;
+    // Gate: Slope must turn back towards 0 (Gate > 2.0 or < -2.0)
+    float GateVal = SetupBSlopeGate.GetFloat();
+
+    bool SetupB_Long  = AtBot20 && CandleBullish && (CurrentSlope > GateVal);
+    bool SetupB_Short = AtTop20 && CandleBearish && (CurrentSlope < -GateVal);
 
     // --- SETUP C: TREND PULLBACK (SMA + 0.5 SD) ---
     bool SetupC_Long = false;
     if (StrongUp && InShallowLongZone && TouchedSMA && CandleBullish)
     {
-        SetupC_Long = true; // Buy off SMA100/0.5SD
+        SetupC_Long = true;
     }
 
     bool SetupC_Short = false;
     if (StrongDown && InShallowShortZone && TouchedSMA && CandleBearish)
     {
-        SetupC_Short = true; // Sell off SMA100/0.5SD
+        SetupC_Short = true;
     }
 
-    // --- FINAL TRIGGER + KILL SWITCH ---
-    bool DoLong  = InRTH && (SetupA_Long || SetupB_Long || SetupC_Long);
+    // --- SETUP D: EXTREME BREAKOUT (NEW) ---
+    // Condition: Slope Extreme + EMA Confirm + Breakout
+    bool SetupD_Long = false;
+    if (IsExtremeUp && sc.Close[sc.Index] > EMA50[sc.Index] && sc.Close[sc.Index] > Highest5)
+    {
+        SetupD_Long = true; // Breakout Long
+    }
 
-    // KILL SWITCH: If Slope < -8.0, NO LONGS allowed
-    if (KillSwitchLong)
+    bool SetupD_Short = false;
+    if (IsExtremeDown && sc.Close[sc.Index] < EMA50[sc.Index] && sc.Close[sc.Index] < Lowest5)
+    {
+        SetupD_Short = true; // Breakout Short
+    }
+
+    // --- FINAL TRIGGER ---
+
+    // 1. Accumulate Longs
+    bool DoLong = InRTH && (SetupA_Long || SetupB_Long || SetupC_Long || SetupD_Long);
+
+    // SAFETY BLOCK: If Extreme Down Slope, ONLY Setup D (Breakout Short) is valid logic,
+    // but here we are checking Longs. So we BLOCK Longs unless it's a specific counter-logic (which Setup B handles).
+    // However, Setup B has a Gate. If slope is <-8, Setup B requires Slope > 2 to fire, so it's safe.
+    // The Kill Switch "BlockStandardLong" applies to non-gated or weak setups.
+    if (BlockStandardLong)
+    {
+        // Block A and C. B is self-gated. D is Short-only in this state.
+        // So effectively all longs are blocked until Slope recovers.
         DoLong = false;
+    }
 
-    bool DoShort = InRTH && (SetupA_Short || SetupB_Short || SetupC_Short);
+    // 2. Accumulate Shorts
+    bool DoShort = InRTH && (SetupA_Short || SetupB_Short || SetupC_Short || SetupD_Short);
 
-    // KILL SWITCH: If Slope > 8.0, NO SHORTS allowed
-    if (KillSwitchShort)
+    if (BlockStandardShort)
+    {
         DoShort = false;
+    }
 
+    // --- Override Block for Setup D ---
+    // If we have a valid Setup D (Breakout), we MUST allow it even if we are in "Extreme" mode.
+    // Actually, Setup D *requires* Extreme mode.
+    // So:
+    if (SetupD_Long && InRTH) DoLong = true;
+    if (SetupD_Short && InRTH) DoShort = true;
+
+
+    // --- Visuals ---
     if (DoLong)
         LongSignal[sc.Index] = sc.Low[sc.Index] - (ATR[sc.Index] * 0.5f);
 
@@ -509,8 +563,8 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
                     LastTradeIndex = sc.Index;
 
                     SCString msg;
-                    msg.Format("XYL V19: LONG (A:%d B:%d C:%d Sc:%d Slope:%.2f)",
-                        SetupA_Long, SetupB_Long, SetupC_Long, totalScore, CurrentSlope);
+                    msg.Format("XYL V21: LONG (A:%d B:%d C:%d D:%d Sc:%d)",
+                        SetupA_Long, SetupB_Long, SetupC_Long, SetupD_Long, totalScore);
                     sc.AddMessageToLog(msg, 1);
                 }
             }
@@ -522,8 +576,8 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
                     LastTradeIndex = sc.Index;
 
                     SCString msg;
-                    msg.Format("XYL V19: SHORT (A:%d B:%d C:%d Sc:%d Slope:%.2f)",
-                        SetupA_Short, SetupB_Short, SetupC_Short, totalScore, CurrentSlope);
+                    msg.Format("XYL V21: SHORT (A:%d B:%d C:%d D:%d Sc:%d)",
+                        SetupA_Short, SetupB_Short, SetupC_Short, SetupD_Short, totalScore);
                     sc.AddMessageToLog(msg, 1);
                 }
             }
