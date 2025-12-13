@@ -13,9 +13,11 @@ SCDLLName("XYL - Momentum Bot")
     Setup C (Trend Pullback): "Buy the Dip" logic triggering on SMA 100 touches
     during Strong Trends (Slope > 0.10%) while price remains in the shallow zone.
     Setup D (Extreme Breakout): Trend-following mode for violent moves
-    (Slope > 0.25% or < -0.25%) using EMA 50 confirmation and 5-bar swing breakouts.
+    (Slope > 0.10%) using EMA 50 confirmation and 5-bar swing breakouts.
+    Setup E (Trend Continuation): Sell the Rally / Buy the Dip at key levels
+    (EMA50, SMA100, VWAP±1SD) during trends with bearish/bullish rejection candles.
     FILTERS:
-    - Chop Detection: Blocks A/C/D when slope flips > 2 times in 10 bars
+    - Chop Detection: Blocks A/C/D/E when 70%+ of bars have slope < 0.05%
     - Signal Spacing: Min 5 bars between signals
     - Virtual Position: Tracks trades to prevent clustering
 */
@@ -80,6 +82,19 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     int& LastExitIndex          = sc.GetPersistentInt(10); // Cooldown after exit
     int& LastSignalIndex        = sc.GetPersistentInt(11); // Track last signal bar
     int& LastVWAPBar            = sc.GetPersistentInt(12); // Track last VWAP processed bar
+
+    // Slope Tracking (for debugging)
+    double& MinSlopeSession     = sc.GetPersistentDouble(13);
+    double& MaxSlopeSession     = sc.GetPersistentDouble(14);
+    int& TotalBarCount          = sc.GetPersistentInt(15);
+    int& SlopeNegCount          = sc.GetPersistentInt(16);  // < 0
+    int& SlopeNeg05Count        = sc.GetPersistentInt(17);  // < -0.05%
+    int& SlopeNeg08Count        = sc.GetPersistentInt(18);  // < -0.08%
+    int& SlopePosCount          = sc.GetPersistentInt(19);  // > 0
+    int& SlopePos05Count        = sc.GetPersistentInt(20);  // > 0.05%
+    int& SlopePos08Count        = sc.GetPersistentInt(21);  // > 0.08%
+    int& SlopeNeg05to0Count     = sc.GetPersistentInt(22);  // -0.05% to 0
+    int& Slope0toPos05Count     = sc.GetPersistentInt(23);  // 0 to 0.05%
 
     // =========================================================================
     // 3. INPUTS
@@ -148,7 +163,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         MinSlopeThreshold.SetFloat(0.10f); // ~7 pts on ES, ~26 pts on NQ
 
         ExtremeSlopeBlock.Name = "Kill Switch Slope (%)";
-        ExtremeSlopeBlock.SetFloat(0.25f); // ~17 pts on ES, ~64 pts on NQ
+        ExtremeSlopeBlock.SetFloat(0.10f); // ~7 pts on ES, ~25 pts on NQ
 
         SetupBSlopeGate.Name = "Setup B Reversion Gate (%)";
         SetupBSlopeGate.SetFloat(0.06f); // ~4 pts on ES, ~15 pts on NQ
@@ -157,7 +172,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         ChopLookback.SetInt(20);
 
         MaxSlopeFlips.Name = "Chop Small Slope Pct (%)";
-        MaxSlopeFlips.SetInt(80);  // Choppy if 80% of bars have slope < 0.05%
+        MaxSlopeFlips.SetInt(70);  // Choppy if 70% of bars have slope < 0.05%
 
         MinBarsBetweenTrades.Name = "Min Bars Between Signals";
         MinBarsBetweenTrades.SetInt(5); // Reduced from 10
@@ -252,6 +267,22 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         VirtPos             = 0; // Reset Virtual Position
         LastVWAPBar         = -1; // Reset VWAP bar tracking
     }
+
+    // Reset slope tracking only on full recalculation (start of chart load)
+    if (sc.Index == 0)
+    {
+        MinSlopeSession = 999.0;
+        MaxSlopeSession = -999.0;
+        TotalBarCount = 0;
+        SlopeNegCount = 0;
+        SlopeNeg05Count = 0;
+        SlopeNeg08Count = 0;
+        SlopePosCount = 0;
+        SlopePos05Count = 0;
+        SlopePos08Count = 0;
+        SlopeNeg05to0Count = 0;
+        Slope0toPos05Count = 0;
+    }
     else
     {
         CumDelta[sc.Index] = CumDelta[sc.Index - 1] + (sc.AskVolume[sc.Index] - sc.BidVolume[sc.Index]);
@@ -277,22 +308,17 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
     float VWAPValue = VWAP[sc.Index];
 
-    // --- StdDev Calculation (manual - needed for bands, built-in doesn't provide) ---
-    double CumulativeP2V = 0.0;
-    double CumulativeVolume = 0.0;
+    // --- StdDev Calculation (incremental using persistent accumulators - O(1) per bar) ---
+    float Price = sc.BaseData[SC_LAST][sc.Index];
+    float Volume = sc.BaseData[SC_VOLUME][sc.Index];
 
-    for (int i = DayStartBarIndex; i <= sc.Index; i++)
-    {
-        float Price = sc.BaseData[SC_LAST][i];
-        float Volume = sc.BaseData[SC_VOLUME][i];
-        CumulativeP2V += (Price * Price) * Volume;
-        CumulativeVolume += Volume;
-    }
+    CumVol += Volume;
+    CumP2V += (Price * Price) * Volume;
 
     float StdDev = 0.0f;
-    if (CumulativeVolume > 0)
+    if (CumVol > 0)
     {
-        double MeanOfSquares = CumulativeP2V / CumulativeVolume;
+        double MeanOfSquares = CumP2V / CumVol;
         double Variance = MeanOfSquares - (VWAPValue * VWAPValue);
         if (Variance < 0) Variance = 0;
         StdDev = (float)sqrt(Variance);
@@ -301,6 +327,10 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     // Bands
     Band_Top_20[sc.Index] = VWAP[sc.Index] + (2.0f * StdDev);
     Band_Bot_20[sc.Index] = VWAP[sc.Index] - (2.0f * StdDev);
+
+    // Internal 1.0 SD (for trend continuation)
+    float Band_Top_10 = VWAP[sc.Index] + (1.0f * StdDev);
+    float Band_Bot_10 = VWAP[sc.Index] - (1.0f * StdDev);
 
     // Internal 0.5 SD
     float Band_Top_05 = VWAP[sc.Index] + (0.5f * StdDev);
@@ -324,6 +354,41 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         CurrentSlope = (AbsoluteSlope / PriceNow) * 100.0f;
     }
     PriceSlope[sc.Index] = CurrentSlope;
+
+    // Track min/max slope for session (every bar)
+    if (CurrentSlope < MinSlopeSession) MinSlopeSession = CurrentSlope;
+    if (CurrentSlope > MaxSlopeSession) MaxSlopeSession = CurrentSlope;
+
+    // Count slope distribution
+    TotalBarCount++;
+    if (CurrentSlope < 0) SlopeNegCount++;
+    if (CurrentSlope < -0.05f) SlopeNeg05Count++;
+    if (CurrentSlope < -0.08f) SlopeNeg08Count++;
+    if (CurrentSlope > 0) SlopePosCount++;
+    if (CurrentSlope > 0.05f) SlopePos05Count++;
+    if (CurrentSlope > 0.08f) SlopePos08Count++;
+    if (CurrentSlope >= -0.05f && CurrentSlope < 0) SlopeNeg05to0Count++;
+    if (CurrentSlope > 0 && CurrentSlope <= 0.05f) Slope0toPos05Count++;
+
+    // Log slope stats on bar close or on full recalculation (study load)
+    bool IsLastBar = (sc.Index == sc.ArraySize - 1);
+    bool BarClosed = (sc.GetBarHasClosedStatus() == BHCS_BAR_HAS_CLOSED);
+    bool IsFullRecalc = sc.IsFullRecalculation;
+
+    if (IsLastBar && (BarClosed || IsFullRecalc))
+    {
+        float Total = (float)TotalBarCount;
+        SCString LogMsg;
+        LogMsg.Format("Slope: Min=%.3f%% Max=%.3f%% | Bars=%d | <-0.08: %d(%.1f%%) <-0.05: %d(%.1f%%) [-0.05,0): %d(%.1f%%) | (0,0.05]: %d(%.1f%%) >0.05: %d(%.1f%%) >0.08: %d(%.1f%%)",
+            MinSlopeSession, MaxSlopeSession, TotalBarCount,
+            SlopeNeg08Count, (SlopeNeg08Count / Total) * 100.0f,
+            SlopeNeg05Count, (SlopeNeg05Count / Total) * 100.0f,
+            SlopeNeg05to0Count, (SlopeNeg05to0Count / Total) * 100.0f,
+            Slope0toPos05Count, (Slope0toPos05Count / Total) * 100.0f,
+            SlopePos05Count, (SlopePos05Count / Total) * 100.0f,
+            SlopePos08Count, (SlopePos08Count / Total) * 100.0f);
+        sc.AddMessageToLog(LogMsg, 1);  // 1 = red color
+    }
 
     // 2. Trend States
     float TrendThresh = MinSlopeThreshold.GetFloat();
@@ -557,11 +622,42 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         SetupD_Short = true;
     }
 
+    // --- SETUP E: TREND CONTINUATION (Sell the Rally / Buy the Dip) ---
+    // Catches entries when price rallies to key resistance/support in trends
+    bool SetupE_Long = false;
+    bool SetupE_Short = false;
+
+    // Short: In downtrend, price rallied to resistance (EMA50/SMA100/VWAP-1SD), bearish rejection
+    bool BelowVWAP = (sc.Close[sc.Index] < VWAP[sc.Index]);
+    bool TouchedResistance = (sc.High[sc.Index] >= EMA50[sc.Index]) ||
+                              (sc.High[sc.Index] >= SMA100[sc.Index]) ||
+                              (sc.High[sc.Index] >= Band_Bot_10);  // VWAP -1SD as resistance in downtrend
+    bool BearishRejection = (sc.Close[sc.Index] < sc.Open[sc.Index]) &&
+                            (sc.High[sc.Index] - sc.Close[sc.Index] > sc.Close[sc.Index] - sc.Low[sc.Index]);
+
+    if (!IsChoppy && StrongDown && BelowVWAP && TouchedResistance && CandleBearish)
+    {
+        SetupE_Short = true;
+    }
+
+    // Long: In uptrend, price dipped to support (EMA50/SMA100/VWAP+1SD), bullish rejection
+    bool AboveVWAP = (sc.Close[sc.Index] > VWAP[sc.Index]);
+    bool TouchedSupport = (sc.Low[sc.Index] <= EMA50[sc.Index]) ||
+                          (sc.Low[sc.Index] <= SMA100[sc.Index]) ||
+                          (sc.Low[sc.Index] <= Band_Top_10);  // VWAP +1SD as support in uptrend
+    bool BullishRejection = (sc.Close[sc.Index] > sc.Open[sc.Index]) &&
+                            (sc.Close[sc.Index] - sc.Low[sc.Index] > sc.High[sc.Index] - sc.Close[sc.Index]);
+
+    if (!IsChoppy && StrongUp && AboveVWAP && TouchedSupport && CandleBullish)
+    {
+        SetupE_Long = true;
+    }
+
     // --- TRIGGERS ---
-    bool DoLong  = InRTH && (SetupA_Long || SetupB_Long || SetupC_Long || SetupD_Long);
+    bool DoLong  = InRTH && (SetupA_Long || SetupB_Long || SetupC_Long || SetupD_Long || SetupE_Long);
     if (IsExtremeDown && !SetupD_Long) DoLong = false;
 
-    bool DoShort = InRTH && (SetupA_Short || SetupB_Short || SetupC_Short || SetupD_Short);
+    bool DoShort = InRTH && (SetupA_Short || SetupB_Short || SetupC_Short || SetupD_Short || SetupE_Short);
     if (IsExtremeUp && !SetupD_Short) DoShort = false;
 
     // Target Selection Logic
