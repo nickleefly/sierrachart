@@ -720,9 +720,33 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
     if (DoLong)
     {
+        // Determine which setup triggered
+        SCString SetupLabel = "";
+        if (SetupA_Long) SetupLabel = "A";
+        else if (SetupB_Long) SetupLabel = "B";
+        else if (SetupC_Long) SetupLabel = "C";
+        else if (SetupD_Long) SetupLabel = "D";
+        else if (SetupE_Long) SetupLabel = "E";
+
         // 1. Paint Signal & Mark
         LongSignal[sc.Index] = sc.Low[sc.Index] - (ATR[sc.Index] * 0.5f);
         LastSignalIndex = sc.Index;
+
+        // Add setup label text
+        s_UseTool Tool;
+        Tool.Clear();
+        Tool.ChartNumber = sc.ChartNumber;
+        Tool.DrawingType = DRAWING_TEXT;
+        Tool.LineNumber = sc.Index + 100000;
+        Tool.BeginDateTime = sc.BaseDateTimeIn[sc.Index];
+        Tool.BeginValue = sc.Low[sc.Index] - (ATR[sc.Index] * 1.2f);
+        Tool.Text = SetupLabel;
+        Tool.Color = RGB(0, 200, 0);
+        Tool.FontBold = true;
+        Tool.FontSize = 12;
+        Tool.TextAlignment = DT_CENTER | DT_VCENTER;
+        Tool.AddMethod = UTAM_ADD_OR_ADJUST;
+        sc.UseTool(Tool);
 
         // 2. Set Virtual State
         VirtPos         = 1;
@@ -751,9 +775,33 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     }
     else if (DoShort)
     {
+        // Determine which setup triggered
+        SCString SetupLabel = "";
+        if (SetupA_Short) SetupLabel = "A";
+        else if (SetupB_Short) SetupLabel = "B";
+        else if (SetupC_Short) SetupLabel = "C";
+        else if (SetupD_Short) SetupLabel = "D";
+        else if (SetupE_Short) SetupLabel = "E";
+
         // 1. Paint Signal & Mark
         ShortSignal[sc.Index] = sc.High[sc.Index] + (ATR[sc.Index] * 0.5f);
         LastSignalIndex = sc.Index;
+
+        // Add setup label text
+        s_UseTool Tool;
+        Tool.Clear();
+        Tool.ChartNumber = sc.ChartNumber;
+        Tool.DrawingType = DRAWING_TEXT;
+        Tool.LineNumber = sc.Index + 200000;
+        Tool.BeginDateTime = sc.BaseDateTimeIn[sc.Index];
+        Tool.BeginValue = sc.High[sc.Index] + (ATR[sc.Index] * 1.2f);
+        Tool.Text = SetupLabel;
+        Tool.Color = RGB(255, 50, 50);
+        Tool.FontBold = true;
+        Tool.FontSize = 12;
+        Tool.TextAlignment = DT_CENTER | DT_VCENTER;
+        Tool.AddMethod = UTAM_ADD_OR_ADJUST;
+        sc.UseTool(Tool);
 
         // 2. Set Virtual State
         VirtPos         = -1;
