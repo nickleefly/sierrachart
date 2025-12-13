@@ -621,11 +621,16 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
     if (sc.GetBarHasClosedStatus() != BHCS_BAR_HAS_CLOSED) return;
 
-    // *** BLOCKER: No signals if trade is active ***
-    if (TradeDirection != 0) return;
+    // During full recalculation of historical bars, skip blocking conditions
+    // This ensures signals regenerate properly
+    bool IsHistoricalBar = (sc.Index < sc.ArraySize - 1);
+    bool SkipBlocking = sc.IsFullRecalculation && IsHistoricalBar;
 
-    // *** MINIMUM SPACING: Only allow signals every N bars ***
-    if ((sc.Index - LastSignalIndex) < MinBarsBetweenTrades.GetInt()) return;
+    // *** BLOCKER: No signals if trade is active (skip during recalc of history) ***
+    if (!SkipBlocking && TradeDirection != 0) return;
+
+    // *** MINIMUM SPACING: Only allow signals every N bars (skip during recalc of history) ***
+    if (!SkipBlocking && (sc.Index - LastSignalIndex) < MinBarsBetweenTrades.GetInt()) return;
 
     bool InRTH = true;
     if (TradeRTHOnly.GetYesNo())
@@ -755,8 +760,9 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         : TargetATRMult.GetFloat();
 
     // =========================================================================
-    // 10. EXECUTION & VIRTUAL UPDATE
+    // 10. EXECUTION & SIGNAL GENERATION
     // =========================================================================
+
 
     if (DoLong)
     {
