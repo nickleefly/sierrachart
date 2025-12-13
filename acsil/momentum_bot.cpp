@@ -116,6 +116,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     SCInputRef ChopLookback        = sc.Input[13];
     SCInputRef MaxSlopeFlips       = sc.Input[14];
     SCInputRef MinBarsBetweenTrades= sc.Input[15];
+    SCInputRef SlopeDirThreshold   = sc.Input[16];  // Slope direction filter %
 
     // =========================================================================
     // 4. CONFIGURATION (SetDefaults)
@@ -176,6 +177,9 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
         MinBarsBetweenTrades.Name = "Min Bars Between Signals";
         MinBarsBetweenTrades.SetInt(5); // Reduced from 10
+
+        SlopeDirThreshold.Name = "Slope Direction Block (%)";
+        SlopeDirThreshold.SetInt(50);  // Block longs if 50%+ bars have negative slope
 
         // --- Visuals ---
         Band_Top_20.Name = "T2 std";
@@ -400,8 +404,10 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     bool IsExtremeUp  = (CurrentSlope > KillThresh);
     bool IsExtremeDown= (CurrentSlope < -KillThresh);
 
-    // 4. Chop Detection - 80% of last 20 bars with small slope = choppy
+    // 4. Chop Detection + Slope Direction (shared lookback)
     int SmallSlopeCount = 0;
+    int NegSlopeCount = 0;
+    int PosSlopeCount = 0;
     int Lookback = ChopLookback.GetInt();
     float ChopSlopeThreshold = 0.05f;  // 0.05% threshold for "no real movement"
     int BarsChecked = 0;
@@ -413,18 +419,30 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
             break;
 
         BarsChecked++;
-        float AbsSlope = (PriceSlope[idx] > 0) ? PriceSlope[idx] : -PriceSlope[idx];
+        float slope = PriceSlope[idx];
+        float AbsSlope = (slope > 0) ? slope : -slope;
 
         if (AbsSlope < ChopSlopeThreshold)
         {
             SmallSlopeCount++;
         }
+
+        // Count slope direction
+        if (slope < 0) NegSlopeCount++;
+        if (slope > 0) PosSlopeCount++;
     }
 
     // Choppy if X% of bars have tiny slope changes
     float ChopPercent = (BarsChecked > 0) ? (SmallSlopeCount * 100.0f / BarsChecked) : 0.0f;
     bool IsChoppy = (ChopPercent >= (float)MaxSlopeFlips.GetInt());
     ChopState[sc.Index] = IsChoppy ? 1.0f : 0.0f;  // 1.0 = True (Choppy), 0.0 = False
+
+    // Slope Direction Filter: X%+ negative = no longs, X%+ positive = no shorts
+    float NegSlopePct = (BarsChecked > 0) ? (NegSlopeCount * 100.0f / BarsChecked) : 0.0f;
+    float PosSlopePct = (BarsChecked > 0) ? (PosSlopeCount * 100.0f / BarsChecked) : 0.0f;
+    float DirThreshold = (float)SlopeDirThreshold.GetInt();
+    bool MajorityNegative = (NegSlopePct >= DirThreshold);
+    bool MajorityPositive = (PosSlopePct >= DirThreshold);
 
     // =========================================================================
     // 7. INDICATORS & SCORING
@@ -659,6 +677,29 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
     bool DoShort = InRTH && (SetupA_Short || SetupB_Short || SetupC_Short || SetupD_Short || SetupE_Short);
     if (IsExtremeUp && !SetupD_Short) DoShort = false;
+
+    // --- STRUCTURAL FILTERS: Block counter-trend trades ---
+    // No longs when clearly in downtrend structure (below VWAP AND below SMA100)
+    bool DowntrendStructure = (sc.Close[sc.Index] < VWAP[sc.Index] && sc.Close[sc.Index] < SMA100[sc.Index]);
+    if (DowntrendStructure) DoLong = false;
+
+    // No shorts when clearly in uptrend structure (above VWAP AND above SMA100)
+    bool UptrendStructure = (sc.Close[sc.Index] > VWAP[sc.Index] && sc.Close[sc.Index] > SMA100[sc.Index]);
+    if (UptrendStructure) DoShort = false;
+
+    // --- SLOPE FILTERS: Block counter-trend trades based on momentum ---
+    // No longs when slope is strongly negative (except Setup D breakout)
+    if (StrongDown && !SetupD_Long) DoLong = false;
+
+    // No shorts when slope is strongly positive (except Setup D breakout)
+    if (StrongUp && !SetupD_Short) DoShort = false;
+
+    // --- SLOPE DIRECTION FILTER: 50%+ of last 20 bars ---
+    // No longs when majority of recent bars have negative slope
+    if (MajorityNegative) DoLong = false;
+
+    // No shorts when majority of recent bars have positive slope
+    if (MajorityPositive) DoShort = false;
 
     // Target Selection Logic
     float SlopeMag = (CurrentSlope > 0) ? CurrentSlope : -CurrentSlope;
