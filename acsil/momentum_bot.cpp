@@ -151,13 +151,13 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         ExtremeSlopeBlock.SetFloat(0.25f); // ~17 pts on ES, ~64 pts on NQ
 
         SetupBSlopeGate.Name = "Setup B Reversion Gate (%)";
-        SetupBSlopeGate.SetFloat(0.05f); // ~3 pts on ES, ~13 pts on NQ
+        SetupBSlopeGate.SetFloat(0.06f); // ~4 pts on ES, ~15 pts on NQ
 
         ChopLookback.Name = "Chop Detection Lookback";
-        ChopLookback.SetInt(10);
+        ChopLookback.SetInt(20);
 
-        MaxSlopeFlips.Name = "Max Slope Flips Allowed";
-        MaxSlopeFlips.SetInt(3);  // Lower = more sensitive chop detection
+        MaxSlopeFlips.Name = "Chop Small Slope Pct (%)";
+        MaxSlopeFlips.SetInt(80);  // Choppy if 80% of bars have slope < 0.05%
 
         MinBarsBetweenTrades.Name = "Min Bars Between Signals";
         MinBarsBetweenTrades.SetInt(5); // Reduced from 10
@@ -257,7 +257,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         CumDelta[sc.Index] = CumDelta[sc.Index - 1] + (sc.AskVolume[sc.Index] - sc.BidVolume[sc.Index]);
     }
 
-    // --- Find Day Start Bar Index (same as vwap_bands.cpp) ---
+    // --- Find Day Start Bar Index ---
     int DayStartBarIndex = sc.Index;
     int CurrentDate = sc.GetTradingDayDate(sc.BaseDateTimeIn[sc.Index]);
 
@@ -271,38 +271,31 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         }
     }
 
-    // --- VWAP Calculation (recalculate from day start - proven approach) ---
-    double CumulativePV = 0.0;
-    double CumulativeVolume = 0.0;
+    // --- VWAP Calculation using Sierra Chart built-in (faster internal loop) ---
+    int BarsInDay = sc.Index - DayStartBarIndex + 1;
+    sc.VolumeWeightedMovingAverage(sc.BaseData[SC_LAST], sc.BaseData[SC_VOLUME], VWAP, sc.Index, BarsInDay);
+
+    float VWAPValue = VWAP[sc.Index];
+
+    // --- StdDev Calculation (manual - needed for bands, built-in doesn't provide) ---
     double CumulativeP2V = 0.0;
+    double CumulativeVolume = 0.0;
 
     for (int i = DayStartBarIndex; i <= sc.Index; i++)
     {
         float Price = sc.BaseData[SC_LAST][i];
         float Volume = sc.BaseData[SC_VOLUME][i];
-
-        CumulativePV += Price * Volume;
-        CumulativeVolume += Volume;
         CumulativeP2V += (Price * Price) * Volume;
+        CumulativeVolume += Volume;
     }
 
-    double VWAPValue = 0.0;
     float StdDev = 0.0f;
-
     if (CumulativeVolume > 0)
     {
-        VWAPValue = CumulativePV / CumulativeVolume;
-        VWAP[sc.Index] = (float)VWAPValue;
-
         double MeanOfSquares = CumulativeP2V / CumulativeVolume;
         double Variance = MeanOfSquares - (VWAPValue * VWAPValue);
         if (Variance < 0) Variance = 0;
         StdDev = (float)sqrt(Variance);
-    }
-    else
-    {
-        VWAPValue = sc.Close[sc.Index];
-        VWAP[sc.Index] = (float)VWAPValue;
     }
 
     // Bands
@@ -342,26 +335,30 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     bool IsExtremeUp  = (CurrentSlope > KillThresh);
     bool IsExtremeDown= (CurrentSlope < -KillThresh);
 
-    // 4. Chop Detection
-    int FlipCount = 0;
-    int Lookback  = ChopLookback.GetInt();
+    // 4. Chop Detection - 80% of last 20 bars with small slope = choppy
+    int SmallSlopeCount = 0;
+    int Lookback = ChopLookback.GetInt();
+    float ChopSlopeThreshold = 0.05f;  // 0.05% threshold for "no real movement"
+    int BarsChecked = 0;
 
     for (int i = 0; i < Lookback; i++)
     {
         int idx = sc.Index - i;
-        if (idx <= 0)
+        if (idx < 0)
             break;
 
-        float sCurrent = PriceSlope[idx];
-        float sPrev    = PriceSlope[idx-1];
+        BarsChecked++;
+        float AbsSlope = (PriceSlope[idx] > 0) ? PriceSlope[idx] : -PriceSlope[idx];
 
-        if ((sCurrent > 0 && sPrev < 0) || (sCurrent < 0 && sPrev > 0))
+        if (AbsSlope < ChopSlopeThreshold)
         {
-            FlipCount++;
+            SmallSlopeCount++;
         }
     }
 
-    bool IsChoppy = (FlipCount > MaxSlopeFlips.GetInt());
+    // Choppy if X% of bars have tiny slope changes
+    float ChopPercent = (BarsChecked > 0) ? (SmallSlopeCount * 100.0f / BarsChecked) : 0.0f;
+    bool IsChoppy = (ChopPercent >= (float)MaxSlopeFlips.GetInt());
     ChopState[sc.Index] = IsChoppy ? 1.0f : 0.0f;  // 1.0 = True (Choppy), 0.0 = False
 
     // =========================================================================
