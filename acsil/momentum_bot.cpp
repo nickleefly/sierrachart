@@ -68,9 +68,6 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     // =========================================================================
 
     int& LastDayDate            = sc.GetPersistentInt(0);
-    double& CumVol              = sc.GetPersistentDouble(1);
-    double& CumPV               = sc.GetPersistentDouble(2);
-    double& CumP2V              = sc.GetPersistentDouble(3);
     int& DailyCount             = sc.GetPersistentInt(4);
     int& LastTradeIndex         = sc.GetPersistentInt(5);
 
@@ -81,7 +78,6 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     double& TargetPrice         = sc.GetPersistentDouble(9);
     int& LastExitIndex          = sc.GetPersistentInt(10); // Cooldown after exit
     int& LastSignalIndex        = sc.GetPersistentInt(11); // Track last signal bar
-    int& LastVWAPBar            = sc.GetPersistentInt(12); // Track last VWAP processed bar
 
     // Slope Tracking (for debugging)
     double& MinSlopeSession     = sc.GetPersistentDouble(13);
@@ -282,14 +278,10 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
     if (sc.GetTradingDayDate(sc.BaseDateTimeIn[sc.Index]) != LastDayDate)
     {
-        CumVol              = 0.0;
-        CumPV               = 0.0;
-        CumP2V              = 0.0;
         LastDayDate         = sc.GetTradingDayDate(sc.BaseDateTimeIn[sc.Index]);
         DailyCount          = 0;
         CumDelta[sc.Index]  = 0;
         TradeDirection      = 0; // Reset Trade Position
-        LastVWAPBar         = -1; // Reset VWAP bar tracking
     }
 
     // Reset slope and setup tracking only on full recalculation (start of chart load)
@@ -344,18 +336,25 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
     float VWAPValue = VWAP[sc.Index];
 
-    // --- StdDev Calculation (incremental using persistent accumulators - O(1) per bar) ---
-    float Price = sc.BaseData[SC_LAST][sc.Index];
-    float Volume = sc.BaseData[SC_VOLUME][sc.Index];
+    // --- StdDev Calculation (Iterative for accuracy) ---
+    double TotalVol = 0.0;
+    double TotalP2V = 0.0;
 
-    CumVol += Volume;
-    CumP2V += (Price * Price) * Volume;
+    // Loop from start of day to current bar to calculate sums
+    // This avoids double-counting issues on the last bar during real-time updates
+    for (int i = DayStartBarIndex; i <= sc.Index; i++)
+    {
+        float P = sc.BaseData[SC_LAST][i];
+        float V = sc.BaseData[SC_VOLUME][i];
+        TotalVol += V;
+        TotalP2V += (double)P * P * V;
+    }
 
     float StdDev = 0.0f;
-    if (CumVol > 0)
+    if (TotalVol > 0)
     {
-        double MeanOfSquares = CumP2V / CumVol;
-        double Variance = MeanOfSquares - (VWAPValue * VWAPValue);
+        double MeanOfSquares = TotalP2V / TotalVol;
+        double Variance = MeanOfSquares - ((double)VWAPValue * VWAPValue);
         if (Variance < 0) Variance = 0;
         StdDev = (float)sqrt(Variance);
     }
