@@ -126,7 +126,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     SCInputRef ExtremeSlopeBlock   = sc.Input[11];
     SCInputRef SetupBSlopeGate     = sc.Input[12];
     SCInputRef ChopLookback        = sc.Input[13];
-    SCInputRef MaxSlopeFlips       = sc.Input[14];
+    SCInputRef ChopFlatBarPct      = sc.Input[14];
     SCInputRef MinBarsBetweenTrades= sc.Input[15];
     SCInputRef SlopeDirThreshold   = sc.Input[16];  // Slope direction filter %
     SCInputRef EnableSlopeLog      = sc.Input[17];  // Enable slope stats logging
@@ -186,8 +186,8 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
         ChopLookback.Name = "Chop Detection Lookback";
         ChopLookback.SetInt(20);
 
-        MaxSlopeFlips.Name = "Chop Small Slope Pct (%)";
-        MaxSlopeFlips.SetInt(70);  // Choppy if 70% of bars have slope < 0.05%
+        ChopFlatBarPct.Name = "Chop: Min Flat Bars (%)";
+        ChopFlatBarPct.SetInt(70);  // Choppy if 70% of bars have slope < 0.05%
 
         MinBarsBetweenTrades.Name = "Min Bars Between Signals";
         MinBarsBetweenTrades.SetInt(5); // Reduced from 10
@@ -280,12 +280,12 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     // 5. DATA & VWAP CALCULATION
     // =========================================================================
 
-    if (sc.GetTradingDayDate(sc.Index) != LastDayDate)
+    if (sc.GetTradingDayDate(sc.BaseDateTimeIn[sc.Index]) != LastDayDate)
     {
         CumVol              = 0.0;
         CumPV               = 0.0;
         CumP2V              = 0.0;
-        LastDayDate         = sc.GetTradingDayDate(sc.Index);
+        LastDayDate         = sc.GetTradingDayDate(sc.BaseDateTimeIn[sc.Index]);
         DailyCount          = 0;
         CumDelta[sc.Index]  = 0;
         TradeDirection      = 0; // Reset Trade Position
@@ -469,7 +469,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
     // Choppy if X% of bars have tiny slope changes
     float ChopPercent = (BarsChecked > 0) ? (SmallSlopeCount * 100.0f / BarsChecked) : 0.0f;
-    bool IsChoppy = (ChopPercent >= (float)MaxSlopeFlips.GetInt());
+    bool IsChoppy = (ChopPercent >= (float)ChopFlatBarPct.GetInt());
     ChopState[sc.Index] = IsChoppy ? 1.0f : 0.0f;  // 1.0 = True (Choppy), 0.0 = False
 
     // Slope Direction Filter: X%+ negative = no longs, X%+ positive = no shorts
@@ -621,16 +621,16 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
     if (sc.GetBarHasClosedStatus() != BHCS_BAR_HAS_CLOSED) return;
 
-    // During full recalculation of historical bars, skip blocking conditions
-    // This ensures signals regenerate properly
+    // During full recalculation of historical bars, skip TradeDirection blocker only
+    // This ensures signals regenerate properly, but still enforce spacing
     bool IsHistoricalBar = (sc.Index < sc.ArraySize - 1);
-    bool SkipBlocking = sc.IsFullRecalculation && IsHistoricalBar;
+    bool SkipTradeBlock = sc.IsFullRecalculation && IsHistoricalBar;
 
     // *** BLOCKER: No signals if trade is active (skip during recalc of history) ***
-    if (!SkipBlocking && TradeDirection != 0) return;
+    if (!SkipTradeBlock && TradeDirection != 0) return;
 
-    // *** MINIMUM SPACING: Only allow signals every N bars (skip during recalc of history) ***
-    if (!SkipBlocking && (sc.Index - LastSignalIndex) < MinBarsBetweenTrades.GetInt()) return;
+    // *** MINIMUM SPACING: Always enforce - prevents consecutive signals ***
+    if ((sc.Index - LastSignalIndex) < MinBarsBetweenTrades.GetInt()) return;
 
     bool InRTH = true;
     if (TradeRTHOnly.GetYesNo())
