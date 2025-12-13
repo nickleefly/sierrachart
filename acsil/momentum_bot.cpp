@@ -117,6 +117,7 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     SCInputRef MaxSlopeFlips       = sc.Input[14];
     SCInputRef MinBarsBetweenTrades= sc.Input[15];
     SCInputRef SlopeDirThreshold   = sc.Input[16];  // Slope direction filter %
+    SCInputRef EnableSlopeLog      = sc.Input[17];  // Enable slope stats logging
 
     // =========================================================================
     // 4. CONFIGURATION (SetDefaults)
@@ -180,6 +181,9 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
 
         SlopeDirThreshold.Name = "Slope Direction Block (%)";
         SlopeDirThreshold.SetInt(50);  // Block longs if 50%+ bars have negative slope
+
+        EnableSlopeLog.Name = "Enable Slope Stats Log";
+        EnableSlopeLog.SetYesNo(false);  // Disabled by default
 
         // --- Visuals ---
         Band_Top_20.Name = "T2 std";
@@ -374,24 +378,27 @@ SCSFExport scsf_MomentumReversal(SCStudyInterfaceRef sc)
     if (CurrentSlope >= -0.05f && CurrentSlope < 0) SlopeNeg05to0Count++;
     if (CurrentSlope > 0 && CurrentSlope <= 0.05f) Slope0toPos05Count++;
 
-    // Log slope stats on bar close or on full recalculation (study load)
-    bool IsLastBar = (sc.Index == sc.ArraySize - 1);
-    bool BarClosed = (sc.GetBarHasClosedStatus() == BHCS_BAR_HAS_CLOSED);
-    bool IsFullRecalc = sc.IsFullRecalculation;
-
-    if (IsLastBar && (BarClosed || IsFullRecalc))
+    // Log slope stats on bar close or on full recalculation (if enabled)
+    if (EnableSlopeLog.GetYesNo())
     {
-        float Total = (float)TotalBarCount;
-        SCString LogMsg;
-        LogMsg.Format("Slope: Min=%.3f%% Max=%.3f%% | Bars=%d | <-0.08: %d(%.1f%%) <-0.05: %d(%.1f%%) [-0.05,0): %d(%.1f%%) | (0,0.05]: %d(%.1f%%) >0.05: %d(%.1f%%) >0.08: %d(%.1f%%)",
-            MinSlopeSession, MaxSlopeSession, TotalBarCount,
-            SlopeNeg08Count, (SlopeNeg08Count / Total) * 100.0f,
-            SlopeNeg05Count, (SlopeNeg05Count / Total) * 100.0f,
-            SlopeNeg05to0Count, (SlopeNeg05to0Count / Total) * 100.0f,
-            Slope0toPos05Count, (Slope0toPos05Count / Total) * 100.0f,
-            SlopePos05Count, (SlopePos05Count / Total) * 100.0f,
-            SlopePos08Count, (SlopePos08Count / Total) * 100.0f);
-        sc.AddMessageToLog(LogMsg, 1);  // 1 = red color
+        bool IsLastBar = (sc.Index == sc.ArraySize - 1);
+        bool BarClosed = (sc.GetBarHasClosedStatus() == BHCS_BAR_HAS_CLOSED);
+        bool IsFullRecalc = sc.IsFullRecalculation;
+
+        if (IsLastBar && (BarClosed || IsFullRecalc))
+        {
+            float Total = (float)TotalBarCount;
+            SCString LogMsg;
+            LogMsg.Format("Slope: Min=%.3f%% Max=%.3f%% | Bars=%d | <-0.08: %d(%.1f%%) <-0.05: %d(%.1f%%) [-0.05,0): %d(%.1f%%) | (0,0.05]: %d(%.1f%%) >0.05: %d(%.1f%%) >0.08: %d(%.1f%%)",
+                MinSlopeSession, MaxSlopeSession, TotalBarCount,
+                SlopeNeg08Count, (SlopeNeg08Count / Total) * 100.0f,
+                SlopeNeg05Count, (SlopeNeg05Count / Total) * 100.0f,
+                SlopeNeg05to0Count, (SlopeNeg05to0Count / Total) * 100.0f,
+                Slope0toPos05Count, (Slope0toPos05Count / Total) * 100.0f,
+                SlopePos05Count, (SlopePos05Count / Total) * 100.0f,
+                SlopePos08Count, (SlopePos08Count / Total) * 100.0f);
+            sc.AddMessageToLog(LogMsg, 1);  // 1 = red color
+        }
     }
 
     // 2. Trend States
